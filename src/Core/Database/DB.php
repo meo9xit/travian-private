@@ -243,8 +243,14 @@ class DB
         $now = time();
         foreach ($files as $file) {
             if (is_file($file)) {
-                $fileTime = floor((int)explode("-", basename($file))[1] / 1000);
-                if (($now - $fileTime) >= ($gameFinished ? 2 : 12) * 3600) { // 2 days
+                // Backup files are named backup-<miliseconds>.sql; the dir also
+                // holds a guard index.php, which used to raise
+                // "Undefined offset: 1" here - a warning, and Core\ErrorHandler
+                // turns warnings into exceptions in CLI, so the automatic backup
+                // job died before dumping anything.
+                $parts = explode("-", basename($file));
+                $fileTime = isset($parts[1]) ? floor((int)$parts[1] / 1000) : 0;
+                if ($fileTime > 0 && ($now - $fileTime) >= ($gameFinished ? 2 : 12) * 3600) { // 2 days
                     unlink($file);
                 }
             }
