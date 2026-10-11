@@ -70,16 +70,25 @@ class Dispatcher
             'loginInfo',
         ];
         $config = Config::getInstance();
-	/*
-        if (isset($_GET['AmirhosseinMatini'])) {
-            if (isset($_SESSION[WebService::fixSessionPrefix('allow_interruption')]))
-                unset($_SESSION[WebService::fixSessionPrefix('allow_interruption')]);
-            else {
-                $_SESSION[WebService::fixSessionPrefix('allow_interruption')] = 1;
+        // Interruption mode. Every page that touches a running world from the
+        // ACP (Gifts - gift gold to one player or to everyone, Send email, Hero
+        // add item, the code generators, Edit player/village) starts with
+        // if (!getCustom('allowInterruptionInGame')) -> "Disabled by admin.".
+        // The line below the block overwrites the config value with this session
+        // flag, and the block that SET the flag was commented out, leaving those
+        // pages permanently disabled with no way to switch them on - the ACP
+        // footer even links here as "(System time)". Both names work:
+        //   admin.php?allowInterruption      and the legacy
+        //   admin.php?AmirhosseinMatini
+        if (isset($_GET['allowInterruption']) || isset($_GET['AmirhosseinMatini'])) {
+            $interruptionKey = WebService::fixSessionPrefix('allow_interruption');
+            if (isset($_SESSION[$interruptionKey])) {
+                unset($_SESSION[$interruptionKey]);
+            } else {
+                $_SESSION[$interruptionKey] = 1;
             }
             WebService::redirect('admin.php');
         }
-	*/
         $config->custom->allowInterruptionInGame = isset($_SESSION[WebService::fixSessionPrefix('allow_interruption')]);
         $showNonAdmin = $session->getAdminUid() == 0 || true;
         if (substr(Config::getInstance()->settings->worldId, 0, 3) == 'dev') {

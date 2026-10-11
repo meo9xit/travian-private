@@ -943,13 +943,66 @@ EOF
 global $globalConfig, $config;
 
 // Gold and quality-of-life options.
-$config->gold->startGold = 50;
 $config->game->protection_time = 24 * 3600;
-$config->extraSettings->buyTroops['enabled'] = false;
-$config->extraSettings->buyAnimal['enabled'] = false;
-$config->extraSettings->buyResources['enabled'] = false;
+
+// --- gold ---------------------------------------------------------------
+// Unlimited gold: Session::loadData() overwrites gift_gold with a huge number
+// for every logged-in player, so every premium feature is free and the UI shows
+// "Unlimited" instead of a balance. Flip to true if you want that.
+$config->custom->serverIsFreeGold = false;
+
+// Gold as a gift: startGold goes to every new account, dailyGold is added to
+// every player once a day by the automation engine (Core\Automation). Prices
+// below override src/config/config.custom.php.
+$config->gold->startGold = 100;
+$config->gold->dailyGold = 25;
+$config->gold->plusGold = 25;                 // one Plus account
+$config->gold->goldClubGold = 250;            // gold club
+$config->gold->productionBoostGold = 15;      // +25% production
+$config->gold->finishNowGold = 2;             // finish a building instantly
+$config->gold->exchangeResourcesGold = 3;     // NPC trader
+$config->gold->completeDemolishGold = 10;     // demolish completely
+$config->gold->invitePlayerGold = 0;          // reward for inviting a friend
+
+// The ACP "Gifts" page (admin.php?action=gifts) - gift gold to one player or to
+// everyone, gift resources, fill storage - is gated on this value, but the ACP
+// overwrites it per admin session (src/admin/include/Core/Dispatcher.php). Those
+// tools therefore stay "Disabled by admin." until interruption mode is switched
+// on for that session, once per login:
+//     admin.php?allowInterruption
+//   or click "(System time)" in the ACP footer (the legacy ?AmirhosseinMatini
+//   link, whose handler used to be commented out).
+// This line only covers code paths outside the ACP.
+$config->custom->allowInterruptionInGame = true;
+
+// --- premium features players can buy with gold -------------------------
+// The stock config leaves most of these off (buyResources/buyTroops/buyAnimal
+// are even force-disabled below 1000x speed), so enable them here.
+$config->extraSettings->buyResources['enabled'] = true;   // buy resources
+$config->extraSettings->buyTroops['enabled'] = true;      // buy troops
+$config->extraSettings->buyAnimal['enabled'] = true;      // buy animals
+$config->extraSettings->buyBuildings['enabled'] = true;   // instant buildings
+$config->extraSettings->upgradeToMaxLevel->enabled = true;
+$config->extraSettings->upgradeStorageToMaxLevel->enabled = true;
+$config->extraSettings->smithyMaxLevel->enabled = true;
+$config->extraSettings->addFarms->enabled = true;         // extra farm lists
 $config->extraSettings->generalOptions->finishTraining->enabled = true;
+$config->extraSettings->generalOptions->fasterTraining->enabled = true;
+$config->extraSettings->generalOptions->cancelTrainingQueue->enabled = true;
 $config->extraSettings->generalOptions->buyAdventure->enabled = true;
+$config->extraSettings->generalOptions->increaseStorage->enabled = true;
+$config->extraSettings->generalOptions->oneHourOfProduction->enabled = true;
+$config->extraSettings->generalOptions->smithyUpgradeAllToMax->enabled = true;
+$config->extraSettings->generalOptions->academyResearchAll->enabled = true;
+$config->extraSettings->generalOptions->rallyPointTo20->enabled = true;
+$config->extraSettings->generalOptions->upgradeAllResourcesTo20->enabled = true;
+$config->extraSettings->generalOptions->upgradeAllResourcesTo30->enabled = true;
+$config->extraSettings->power->atkBonus->enabled = true;  // +attack power
+$config->extraSettings->power->atkBonus->duration = 3;    // hours
+$config->extraSettings->power->defBonus->enabled = true;  // +defence power
+$config->extraSettings->power->defBonus->duration = 3;    // hours
+// Hourly protection packages stay gated by src/config/config.custom.php, which
+// enables them until the WW plans are released.
 
 // Fake (AI) players - the game's bots.
 //
@@ -1192,6 +1245,9 @@ ${C_BOLD}Deployment ready${C_RESET}
     admin panel   $BASE_URL/admin.php
     admin account Multihunter / $ADMIN_PASS      <- generated unless you passed --admin-pass
                   change it any time with: $SCRIPT_NAME passwd <new-password>
+    gift gold     $BASE_URL/admin.php?action=gifts
+                  (enable once per admin session at $BASE_URL/admin.php?allowInterruption,
+                   or click "(System time)" in the ACP footer)
 
   ${C_BOLD}Next steps${C_RESET}
     $SCRIPT_NAME status              container state
