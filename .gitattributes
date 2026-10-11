@@ -1,0 +1,24 @@
+# Keep shell scripts LF-only: deploy-travium-docker.sh runs on Linux, and a
+# CRLF shebang makes bash fail with "bad interpreter".
+*.sh text eol=lf
+deploy-travium-docker.sh text eol=lf
+
+# Normalise text files.
+*.php text
+*.js text
+*.css text
+*.sql text
+*.twig text
+*.json text
+
+# Binary assets must not be converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.eot binary
+*.svg text

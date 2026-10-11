@@ -1,0 +1,22 @@
+# Global config: generated per deployment by deploy-travium-docker.sh and it
+# holds database credentials.
+config.php
+
+# One game world. servers/<world>/ is generated from server.tpl by the deploy
+# script and contains per-world settings (with db credentials), logs, backups.
+/servers/
+
+/composer.phar
+/.env
+/node_modules/
+/.idea/
+/.vscode/
+.DS_Store
+
+# Runtime artifacts of a local run.
+/php-server.err.log
+/php-server.out.log
+/integrations/api/include/Templates/Cache/*/
+
+# NOTE: vendor/ and composer.lock are deliberately tracked in this fork. The
+# Dockerfile installs no composer, so a fresh clone runs as-is.
