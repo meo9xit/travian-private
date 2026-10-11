@@ -125,10 +125,17 @@ class StatistikenCtrl extends GameCtrl
             7 => 'Bonus'
         ];
         $listSubs = ['overview', 'attacker', 'defender', 'Top 10'];
-        $this->content->vars['favorText'] = sprintf(T("Global", "Select tab %s as favourite"),
-            T("Statistics", "tabs." . $listTabs[$selectedTabIndex]));
-        $this->content->vars['favorText2'] = sprintf(T("Global", "Select tab %s as favourite"),
-            T("Statistics", "subTabs." . $listSubs[$selectedSubIndex]));
+        // Not every index has a tab (there is no id=4), so opening such a url
+        // used to raise "Undefined offset: 4" here and then log a bogus
+        // "Translation not found: Statistics | tabs." line.
+        $this->content->vars['favorText'] = isset($listTabs[$selectedTabIndex])
+            ? sprintf(T("Global", "Select tab %s as favourite"),
+                T("Statistics", "tabs." . $listTabs[$selectedTabIndex]))
+            : '';
+        $this->content->vars['favorText2'] = isset($listSubs[$selectedSubIndex])
+            ? sprintf(T("Global", "Select tab %s as favourite"),
+                T("Statistics", "subTabs." . $listSubs[$selectedSubIndex]))
+            : '';
         if (Session::getInstance()->isAdmin()) {
             if (isset($_GET['showFakeUsers'])) {
                 Session::setCookie('showFakeUsers', $_GET['showFakeUsers'] == 1 ? 1 : 0, 7 * 86400);
