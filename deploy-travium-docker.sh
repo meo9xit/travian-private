@@ -31,6 +31,8 @@
 #   bots [count]               create fake (AI) players with a village each,
 #                              default 25. They grow on their own while the
 #                              automation engine runs (see: engine start)
+#   passwd [user] <password>   set a login password (default: Multihunter).
+#                              With no argument it lists the accounts.
 #   doctor                     check docker, disk, port and - most useful after a
 #                              failed build - whether the image can fetch its apt
 #                              packages from the Debian archive
@@ -47,7 +49,8 @@
 #   --src PATH        source tree (default: parent dir of this script)
 #   --deploy-dir PATH generated deployment files (default: <src>/../travium-deploy)
 #   --world ID        world folder + database name (default: game)
-#   --admin-pass P    Multihunter password (default: generated)
+#   --admin-pass P    Multihunter password (default: generated). Save it - it is
+#                     printed again by 'creds' and stored in the deployment .env.
 #   --map-size N      map size (default 100 -> 201x201 tiles)
 #   --speed N         game speed (default 1)
 #   --start "WHEN"    world start time (default: now)
@@ -116,7 +119,7 @@ usage() { sed -n '2,56p' "$SCRIPT_DIR/$SCRIPT_NAME" | sed -e 's/^#\{1,2\}//' -e 
 # ---------------------------------------------------------------- parsing ----
 while [ $# -gt 0 ]; do
     case "$1" in
-        install|install-world|set-port|port|bots|bots-add|doctor|diag|up|down|restart|logs|status|ps|creds|config|shell|db|engine|reset|uninstall|help)
+        install|install-world|set-port|port|bots|bots-add|passwd|password|doctor|diag|up|down|restart|logs|status|ps|creds|config|shell|db|engine|reset|uninstall|help)
             COMMAND="$1"; shift ;;
         --host) HOST="${2:-}"; shift 2 ;;
         --port|--http-port) PORT="${2:-}"; shift 2 ;;
@@ -1184,11 +1187,19 @@ ${C_BOLD}Deployment ready${C_RESET}
   deployment      $DEPLOY_DIR
   captured mail   docker compose -f $DEPLOY_DIR/docker-compose.yml exec web cat /tmp/php-mail.log
 
+  ${C_BOLD}Log in${C_RESET}
+    game login    $BASE_URL/login.php
+    admin panel   $BASE_URL/admin.php
+    admin account Multihunter / $ADMIN_PASS      <- generated unless you passed --admin-pass
+                  change it any time with: $SCRIPT_NAME passwd <new-password>
+
   ${C_BOLD}Next steps${C_RESET}
     $SCRIPT_NAME status              container state
     $SCRIPT_NAME logs web            follow the web logs
     $SCRIPT_NAME creds               urls + passwords
-    $SCRIPT_NAME engine status       automation daemon
+    $SCRIPT_NAME bots 30             add fake (AI) players to play against
+    $SCRIPT_NAME passwd              list accounts, or reset a password
+    $SCRIPT_NAME engine status       automation daemon (bots, Natars, backups)
     $SCRIPT_NAME set-port 9000       move everything to another port (keeps the world)
     $SCRIPT_NAME install --host X    repoint the absolute urls (mail links) at another address
     $SCRIPT_NAME install-world --force   rebuild this world from scratch
@@ -1359,6 +1370,48 @@ Then re-run: $SCRIPT_NAME install
 EOF
 }
 
+# Set a login password. The game stores sha1(password) in users.password
+# (unsalted), so this is the whole job - no need to re-run the installer.
+#   ./deploy-travium-docker.sh passwd            -> list the accounts that log in
+#   ./deploy-travium-docker.sh passwd admin123   -> reset Multihunter's password
+#   ./deploy-travium-docker.sh passwd meo9xit pw -> reset another account
+do_passwd() {
+    load_env_file
+    check_docker
+    local user="${POSITIONAL[0]:-}" pass="${POSITIONAL[1]:-}"
+
+    if [ -z "$user" ]; then
+        step "accounts in '$DB_NAME' that can log in"
+        sql_db "$DB_NAME" "SELECT id, name, access, IF(access=2,'admin',IF(access=0,'player','player')) AS kind FROM users WHERE access<3 ORDER BY id"
+        echo
+        log "usage: $SCRIPT_NAME passwd [user] <new-password>    (default user: Multihunter)"
+        log "the AI bots (access=3) cannot log in - there are $(sql_scalar "$DB_NAME" "SELECT COUNT(*) FROM users WHERE access=3") of them"
+        return 0
+    fi
+
+    # One argument means "reset Multihunter".
+    if [ -z "$pass" ]; then
+        pass="$user"
+        user="Multihunter"
+    fi
+
+    case "$user" in
+        *[!A-Za-z0-9_.\ -]*) die "unexpected character in the user name: '$user'" ;;
+    esac
+
+    local hash
+    hash="$(printf '%s' "$pass" | sha1sum | awk '{print $1}')"
+    [ -n "$hash" ] || die "cannot hash the password (is sha1sum installed?)"
+
+    [ "$(sql_scalar "$DB_NAME" "SELECT COUNT(*) FROM users WHERE name='$user'")" = "1" ] \
+        || die "no account named '$user' in $DB_NAME - run '$SCRIPT_NAME passwd' to list them"
+
+    sql_db "$DB_NAME" "UPDATE users SET password='$hash' WHERE name='$user'"
+    ok "password updated for '$user'"
+    log "log in at   $BASE_URL/login.php      (the game login, not the portal sign-up)"
+    log "admin panel $BASE_URL/admin.php      (Multihunter or an access=2 account)"
+}
+
 # Populate the world with fake (AI) players. They are ordinary accounts with
 # access=3 and a village, and they grow by themselves while the automation
 # engine runs (AI::doSomethingRandom + village expansion), which is also what
@@ -1435,6 +1488,7 @@ case "$COMMAND" in
     install-world)   do_install_world ;;
     set-port|port)   do_set_port ;;
     bots|bots-add)   do_bots ;;
+    passwd|password) do_passwd ;;
     doctor|diag)     do_doctor ;;
     up)              load_env_file; check_docker; compose up -d ;;
     down)            load_env_file; check_docker; compose down ;;
