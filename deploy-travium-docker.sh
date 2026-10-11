@@ -28,6 +28,9 @@
 #   install-world [--force]    only the world steps (new world or repair)
 #   set-port N                 move the whole install to another host port
 #                              (keeps the world data)
+#   doctor                     check docker, disk, port and - most useful after a
+#                              failed build - whether the image can fetch its apt
+#                              packages from the Debian archive
 #   up | down | restart | status | config | logs [service] | shell [service] | db
 #   engine start|stop|status|logs
 #   creds                      print urls and passwords
@@ -105,7 +108,7 @@ usage() { sed -n '2,56p' "$SCRIPT_DIR/$SCRIPT_NAME" | sed -e 's/^#\{1,2\}//' -e 
 # ---------------------------------------------------------------- parsing ----
 while [ $# -gt 0 ]; do
     case "$1" in
-        install|install-world|set-port|port|up|down|restart|logs|status|ps|creds|config|shell|db|engine|reset|uninstall|help)
+        install|install-world|set-port|port|doctor|diag|up|down|restart|logs|status|ps|creds|config|shell|db|engine|reset|uninstall|help)
             COMMAND="$1"; shift ;;
         --host) HOST="${2:-}"; shift 2 ;;
         --port|--http-port) PORT="${2:-}"; shift 2 ;;
@@ -310,6 +313,38 @@ EOF
     ok "settings      $DEPLOY_DIR/.env"
 }
 
+# The same sources/package logic the Dockerfile uses, as a standalone script so
+# 'doctor' can show what the image build will do (and why apt would exit 100).
+gen_apt_probe() {
+    write_file "$DEPLOY_DIR/apt-probe.sh" <<'EOF'
+#!/bin/bash
+# Run inside php:7.3-apache: checks that the image build's apt step can succeed.
+set -u
+. /etc/os-release
+suite="${VERSION_CODENAME:-bullseye}"
+case "$suite" in
+    buster|stretch|jessie) sec="$suite/updates" ;;
+    *) sec="$suite-security" ;;
+esac
+printf 'deb http://archive.debian.org/debian %s main\ndeb http://archive.debian.org/debian-security %s main\n' \
+    "$suite" "$sec" > /etc/apt/sources.list
+printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\nAcquire::ForceIPv4 "true";\n' \
+    > /etc/apt/apt.conf.d/99-archive
+echo "release : $PRETTY_NAME"
+echo "sources :"
+grep -v '^#' /etc/apt/sources.list | grep -v '^$' | sed 's/^/          /'
+echo "apt-get update:"
+if apt-get update 2>&1 | tail -4 | sed 's/^/          /'; then :; fi
+echo "packages:"
+for p in libpng-dev libjpeg62-turbo-dev libfreetype6-dev libzip-dev libonig-dev \
+         redis-server redis-tools unzip default-mysql-client; do
+    v="$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/{print $2}')"
+    printf '          %-26s %s\n' "$p" "${v:-MISSING}"
+done
+EOF
+    chmod 0755 "$DEPLOY_DIR/apt-probe.sh"
+}
+
 gen_dockerfile() {
     write_file "$DEPLOY_DIR/Dockerfile" <<'EOF'
 # PHP 7.3 runtime for the ORIGINAL Travium source.
@@ -322,29 +357,43 @@ gen_dockerfile() {
 # loopback, so the daemon runs inside this image.
 FROM php:7.3-apache
 
-# php:7.3-apache is Debian buster, which has moved to archive.debian.org.
+# The Debian release behind php:7.3-apache is old enough to have been moved to
+# archive.debian.org (bullseye for recent pulls, buster for older ones), and the
+# image ships snapshot.debian.org URLs, so build sources.list from the actual
+# release instead of patching theirs. Retries + IPv4 keep a flaky mirror or a
+# broken IPv6 route from failing the build ('apt-get install' then exits 100).
 RUN set -eux; \
-    sed -i \
-        -e 's|deb.debian.org|archive.debian.org|g' \
-        -e 's|security.debian.org|archive.debian.org|g' \
-        /etc/apt/sources.list; \
-    sed -i -e '/-updates/d' /etc/apt/sources.list; \
-    printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99no-check-valid-until; \
+    . /etc/os-release; \
+    suite="${VERSION_CODENAME:-bullseye}"; \
+    case "$suite" in \
+        buster|stretch|jessie) sec="$suite/updates" ;; \
+        *) sec="$suite-security" ;; \
+    esac; \
+    printf 'deb http://archive.debian.org/debian %s main\ndeb http://archive.debian.org/debian-security %s main\n' \
+        "$suite" "$sec" > /etc/apt/sources.list; \
+    printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\nAcquire::ForceIPv4 "true";\n' \
+        > /etc/apt/apt.conf.d/99-archive; \
     apt-get update
 
 # Build libs for gd (map + hero images), zip, mbstring; redis-server/-tools for
-# the daemon and CLI; default-mysql-client to import schemas / backups.
-RUN apt-get install -y --no-install-recommends \
-        libpng-dev \
-        libjpeg62-turbo-dev \
-        libfreetype6-dev \
-        libzip-dev \
-        libonig-dev \
-        redis-server \
-        redis-tools \
-        unzip \
-        default-mysql-client \
-    && rm -rf /var/lib/apt/lists/*
+# the daemon and CLI; default-mysql-client because Core\Database\DB::backup()
+# shells out to mysqldump. One retry, and a readable diagnostic if it still
+# fails, so a bad mirror does not leave just "exit code: 100".
+RUN set -eux; \
+    pkgs="libpng-dev libjpeg62-turbo-dev libfreetype6-dev libzip-dev libonig-dev redis-server redis-tools unzip default-mysql-client"; \
+    apt-get install -y --no-install-recommends $pkgs \
+    || { \
+        echo "apt-get install failed - refreshing indexes and retrying once"; \
+        apt-get update || true; \
+        apt-get install -y --no-install-recommends $pkgs || { \
+            echo "=== apt diagnostics ==="; \
+            . /etc/os-release; echo "release: $PRETTY_NAME"; \
+            grep -v '^#' /etc/apt/sources.list | grep -v '^$'; \
+            for p in $pkgs; do printf '%-26s %s\n' "$p" "$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/{print $2}')"; done; \
+            exit 100; \
+        }; \
+    }; \
+    rm -rf /var/lib/apt/lists/*
 
 # mysqli + pdo_mysql: Core\Database\DB uses mysqli, DBI and the installer use PDO.
 # pcntl: src/AutomationEngine.php forks. opcache: speed.
@@ -795,6 +844,7 @@ gen_all_files() {
     step "generating deployment files ($DEPLOY_DIR)"
     ensure_env_file
     gen_dockerfile
+    gen_apt_probe
     gen_mail_capture
     gen_vhost
     gen_compose
@@ -1097,6 +1147,53 @@ do_reset() {
     ok "removed - '$SCRIPT_NAME install' deploys it again"
 }
 
+# Diagnose a host before/after a failed deploy: docker itself, disk/memory, the
+# requested port and - the usual culprit for "apt-get ... exit code 100" - what
+# the php:7.3-apache image can actually fetch from the Debian archive.
+do_doctor() {
+    check_docker
+    if [ -f "$DEPLOY_DIR/.env" ]; then load_env_file; else [ -n "$PORT" ] || PORT=80; fi
+
+    step "docker"
+    docker version --format 'client  {{.Client.Version}}' 2>/dev/null || true
+    docker version --format 'server  {{.Server.Version}}' 2>/dev/null || warn "cannot read the server version"
+    docker compose version 2>/dev/null | sed 's/^/compose /' || true
+    docker info --format 'driver  {{.Driver}}   cpus {{.NCPU}}   memory {{.MemTotal}}' 2>/dev/null || true
+
+    step "host"
+    if [ -r /etc/os-release ]; then . /etc/os-release; echo "os      $PRETTY_NAME"; else uname -a; fi
+    echo "kernel  $(uname -r)"
+    { df -h / 2>/dev/null | awk 'NR==2{print "disk    "$4" free of "$2}'; } || true
+    { free -m 2>/dev/null | awk 'NR==2{print "memory  "$7" MB available"}'; } || true
+
+    step "port"
+    echo "port    $PORT"
+    warn_if_port_busy
+
+    step "base image + apt (the step that reports exit code 100)"
+    gen_apt_probe
+    # Feed the probe over stdin: no container path appears on the command line,
+    # which keeps MSYS/Git-Bash from rewriting it into a Windows path.
+    if ! docker run --rm -i php:7.3-apache bash -s <"$DEPLOY_DIR/apt-probe.sh"; then
+        warn "could not run the probe - is the php:7.3-apache image pullable from this host?"
+    fi
+
+    step "reading the result"
+    cat <<EOF
+Every package above needs a version. If any says MISSING, or "apt-get update"
+printed errors, the image build cannot install its dependencies:
+
+  * this host/daemon cannot reach archive.debian.org (check outbound HTTP,
+    a corporate proxy, or a DNS resolver that filters it)
+  * or the daemon has no IPv4 route (the Dockerfile forces IPv4 for that reason)
+
+Fixes to try, in order:
+  1. docker run --rm php:7.3-apache bash -c 'apt-get update'   (does it work at all?)
+  2. check the daemon's DNS:  docker run --rm alpine cat /etc/resolv.conf
+  3. point the daemon at a working DNS/proxy, then re-run: $SCRIPT_NAME install
+EOF
+}
+
 # Change the port (or any other generated setting) without touching the world
 # data: regenerate the files, recreate the container with the new mapping, point
 # the absolute urls at the new address and verify.
@@ -1152,6 +1249,7 @@ case "$COMMAND" in
     install)         do_install ;;
     install-world)   do_install_world ;;
     set-port|port)   do_set_port ;;
+    doctor|diag)     do_doctor ;;
     up)              load_env_file; check_docker; compose up -d ;;
     down)            load_env_file; check_docker; compose down ;;
     restart)         load_env_file; check_docker; compose restart ;;
