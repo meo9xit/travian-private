@@ -53,6 +53,10 @@
 #   --tls             add a Caddy container with automatic HTTPS (domains only)
 #   --acme-email E    contact address for Let's Encrypt
 #   --no-build        skip the image build
+#   --build-network N network for the image build: host (default) or default.
+#                     host is the default because a stock Ubuntu container resolves
+#                     through 127.0.0.53, which fails inside the build namespace
+#                     ("Temporary failure resolving 'archive.debian.org'").
 #   --no-engine       do not start the automation daemon
 #   --force           reinstall the world (DROPS its database) even if installed
 #   --dry-run         only write the deployment files, do not touch Docker
@@ -88,6 +92,7 @@ ASSUME_YES=0
 TLS=0
 ACME_EMAIL=""
 PHP_IMAGE_TAG="travium-php:7.3"
+BUILD_NETWORK="host"
 COMMAND=""
 POSITIONAL=()
 
@@ -126,6 +131,7 @@ while [ $# -gt 0 ]; do
         --db-name) DB_NAME="${2:-}"; shift 2 ;;
         --db-user) DB_USER="${2:-}"; shift 2 ;;
         --acme-email) ACME_EMAIL="${2:-}"; shift 2 ;;
+        --build-network) BUILD_NETWORK="${2:-}"; shift 2 ;;
         --tls) TLS=1; shift ;;
         --no-build) BUILD=0; shift ;;
         --no-engine) ENGINE=0; shift ;;
@@ -334,7 +340,12 @@ echo "release : $PRETTY_NAME"
 echo "sources :"
 grep -v '^#' /etc/apt/sources.list | grep -v '^$' | sed 's/^/          /'
 echo "apt-get update:"
-if apt-get update 2>&1 | tail -4 | sed 's/^/          /'; then :; fi
+if apt-get update 2>&1 | tail -6 | sed 's/^/          /'; then :; fi
+if ! apt-cache policy libc6 2>/dev/null | grep -q 'Candidate: [0-9]'; then
+    echo "          ==> NO PACKAGE INDEX AT ALL: this container cannot resolve or"
+    echo "              reach archive.debian.org. That is a DNS/network problem of"
+    echo "              the docker host, not a missing package."
+fi
 echo "packages:"
 for p in libpng-dev libjpeg62-turbo-dev libfreetype6-dev libzip-dev libonig-dev \
          redis-server redis-tools unzip default-mysql-client; do
@@ -373,7 +384,24 @@ RUN set -eux; \
         "$suite" "$sec" > /etc/apt/sources.list; \
     printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\nAcquire::ForceIPv4 "true";\n' \
         > /etc/apt/apt.conf.d/99-archive; \
-    apt-get update
+    apt-get update; \
+    if ! apt-cache policy libc6 | grep -q 'Candidate: [0-9]'; then \
+        echo ""; \
+        echo "*** apt-get update downloaded NO package index."; \
+        echo "*** The build container cannot resolve/reach archive.debian.org:"; \
+        echo "***   Temporary failure resolving 'archive.debian.org'"; \
+        echo "***"; \
+        echo "*** That is the docker HOST's DNS, not a missing package. Two fixes:"; \
+        echo "***  1. build with host networking (this script already does: it runs"; \
+        echo "***     'docker build --network=host', override with --build-network)"; \
+        echo "***  2. or give the daemon working DNS:"; \
+        echo "***       cat /etc/docker/daemon.json   # look before you write"; \
+        echo "***       echo '{\"dns\":[\"1.1.1.1\",\"8.8.8.8\"]}' | sudo tee /etc/docker/daemon.json"; \
+        echo "***       sudo systemctl restart docker"; \
+        echo "***"; \
+        echo "*** Diagnose with: ./deploy-travium-docker.sh doctor"; \
+        exit 1; \
+    fi
 
 # Build libs for gd (map + hero images), zip, mbstring; redis-server/-tools for
 # the daemon and CLI; default-mysql-client because Core\Database\DB::backup()
@@ -859,7 +887,22 @@ start_stack() {
     step "starting containers"
     if [ "$BUILD" = "1" ]; then
         log "building the PHP image - the first build downloads apt packages and pecl-redis (a few minutes)"
-        compose build web
+        # Build with the host network on purpose. On a stock Ubuntu box the
+        # container's /etc/resolv.conf points at systemd-resolved (127.0.0.53),
+        # which nothing listens on inside the build's network namespace, so
+        # apt fails with "Temporary failure resolving 'archive.debian.org'"
+        # and then reports a misleading "Unable to locate package".
+        # Override with --build-network default if you really want the bridge.
+        if [ "$BUILD_NETWORK" != "default" ]; then
+            if ! docker build --network="$BUILD_NETWORK" -t "$PHP_IMAGE_TAG" "$DEPLOY_DIR"; then
+                warn "build failed with --network=$BUILD_NETWORK"
+                warn "if the log mentions 'Temporary failure resolving', fix the daemon DNS:"
+                warn "  echo '{\"dns\":[\"1.1.1.1\",\"8.8.8.8\"]}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker"
+                die "image build failed"
+            fi
+        else
+            docker build -t "$PHP_IMAGE_TAG" "$DEPLOY_DIR" || die "image build failed"
+        fi
     fi
     compose up -d
     ok "containers started"
@@ -1170,27 +1213,48 @@ do_doctor() {
     echo "port    $PORT"
     warn_if_port_busy
 
+    step "dns inside containers (the cause of 'Temporary failure resolving')"
+    log "resolv.conf a normal container gets:"
+    docker run --rm alpine cat /etc/resolv.conf 2>/dev/null | sed 's/^/          /' || warn "could not run alpine"
+    log "resolving archive.debian.org with the default bridge network:"
+    if docker run --rm alpine sh -c 'getent hosts archive.debian.org' 2>/dev/null | sed 's/^/          /'; then
+        ok "the default network can resolve it"
+    else
+        warn "the default network CANNOT resolve it - this is why apt exits 100"
+    fi
+    log "resolving with host networking (what the build uses by default):"
+    if docker run --rm --network=host alpine sh -c 'getent hosts archive.debian.org' 2>/dev/null | sed 's/^/          /'; then
+        ok "host networking resolves it - 'install' will build fine"
+    else
+        warn "host networking cannot resolve it either: fix the host's DNS"
+        warn "  cat /etc/resolv.conf;  nslookup archive.debian.org"
+        warn "  or set a resolvable DNS for the daemon in /etc/docker/daemon.json"
+    fi
+
     step "base image + apt (the step that reports exit code 100)"
     gen_apt_probe
     # Feed the probe over stdin: no container path appears on the command line,
     # which keeps MSYS/Git-Bash from rewriting it into a Windows path.
-    if ! docker run --rm -i php:7.3-apache bash -s <"$DEPLOY_DIR/apt-probe.sh"; then
+    # --network=host matches how the real build runs (see start_stack).
+    if ! docker run --rm -i --network="$BUILD_NETWORK" php:7.3-apache bash -s <"$DEPLOY_DIR/apt-probe.sh"; then
         warn "could not run the probe - is the php:7.3-apache image pullable from this host?"
     fi
 
     step "reading the result"
     cat <<EOF
-Every package above needs a version. If any says MISSING, or "apt-get update"
-printed errors, the image build cannot install its dependencies:
+Every package above needs a version. If any says MISSING, or apt-get update
+printed "Temporary failure resolving", the build container has no working DNS:
 
-  * this host/daemon cannot reach archive.debian.org (check outbound HTTP,
-    a corporate proxy, or a DNS resolver that filters it)
-  * or the daemon has no IPv4 route (the Dockerfile forces IPv4 for that reason)
+  * on Ubuntu this is usually systemd-resolved: the container's /etc/resolv.conf
+    points at 127.0.0.53, where nothing answers inside the container
+  * the deploy script builds with 'docker build --network=host' for exactly this
+    reason (change it with --build-network default)
+  * permanent fix for the daemon:
+        cat /etc/docker/daemon.json                      # look first
+        echo '{"dns":["1.1.1.1","8.8.8.8"]}' | sudo tee /etc/docker/daemon.json
+        sudo systemctl restart docker
 
-Fixes to try, in order:
-  1. docker run --rm php:7.3-apache bash -c 'apt-get update'   (does it work at all?)
-  2. check the daemon's DNS:  docker run --rm alpine cat /etc/resolv.conf
-  3. point the daemon at a working DNS/proxy, then re-run: $SCRIPT_NAME install
+Then re-run: $SCRIPT_NAME install
 EOF
 }
 
