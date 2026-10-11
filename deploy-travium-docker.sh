@@ -717,8 +717,29 @@ $ports_block
         until redis-cli ping >/dev/null 2>&1; do sleep 0.3; done
         echo "redis is up"
         if [ "\$\$TRAVIUM_ENGINE" = "1" ] && [ -f "/var/www/app/servers/\$\$TRAVIUM_WORLD/include/engine.php" ]; then
+          # The automation engine is what finishes buildings, troop training,
+          # hero adventures, attacks and the AI bots. It loads the whole game
+          # config at startup, so on a FIRST deploy it dies instantly: the world
+          # schema does not exist yet (the installer only runs afterwards) and
+          # nothing restarts it - leaving a server where every countdown reaches
+          # zero and nothing happens. Hence a supervisor that keeps it alive and
+          # retries, guarded by a pid file so orphans cannot double-process.
           echo "starting the automation engine for \$\$TRAVIUM_WORLD..."
-          ( TRAVIUM_UNDER_SYSTEMD=1 php "/var/www/app/servers/\$\$TRAVIUM_WORLD/include/engine.php" >>/tmp/engine.log 2>&1 || true ) &
+          (
+            ENGINE_PIDFILE=/tmp/engine.pid
+            while true; do
+              if [ -f "\$\$ENGINE_PIDFILE" ] && kill -0 "\$\$(cat "\$\$ENGINE_PIDFILE")" 2>/dev/null; then
+                sleep 15
+                continue
+              fi
+              TRAVIUM_UNDER_SYSTEMD=1 php "/var/www/app/servers/\$\$TRAVIUM_WORLD/include/engine.php" &
+              echo \$\$! > "\$\$ENGINE_PIDFILE"
+              wait \$\$!
+              echo "[\$\$(date '+%Y-%m-%d %H:%M:%S')] engine exited, restarting in 15s"
+              rm -f "\$\$ENGINE_PIDFILE"
+              sleep 15
+            done
+          ) >>/tmp/engine.log 2>&1 &
           sleep 1
         fi
         apache2-foreground
@@ -1182,6 +1203,40 @@ run_world_installer() {
     installed="$(sql_scalar "$DB_NAME" 'SELECT installed FROM config LIMIT 1')"
     [ "$installed" = "1" ] || die "the installer did not finish (config.installed=$installed) - read servers/$WORLD/include/error_log.log"
     ok "world installed"
+    restart_engine
+}
+
+# The automation engine finishes buildings, troop training, hero adventures,
+# attacks and runs the bots. It reads the whole game config when it starts, so
+# starting it before the world exists (which is what a container boot does on a
+# first deploy) kills it - and then every countdown reaches zero and nothing
+# happens. So: (re)start it once the world is installed, and say so loudly if it
+# is not up.
+engine_pids() {
+    compose exec -T web bash -lc "pgrep -f 'AutomationEngine|include/engine.php' 2>/dev/null | wc -l" 2>/dev/null | tr -d '\r' || echo 0
+}
+
+restart_engine() {
+    [ "$ENGINE" = "1" ] || { log "automation engine disabled (--no-engine)"; return 0; }
+    step "automation engine"
+    compose exec -T web bash -lc "pkill -f 'AutomationEngine|include/engine.php' 2>/dev/null; sleep 1; rm -f /tmp/engine.pid; true" >/dev/null 2>&1 || true
+    compose exec -T web bash -lc "
+        cd /var/www/app
+        setsid env TRAVIUM_UNDER_SYSTEMD=1 php '/var/www/app/servers/$WORLD/include/engine.php' >>/tmp/engine.log 2>&1 < /dev/null &
+        sleep 2
+        exit 0
+    " >/dev/null 2>&1 || true
+    local pids
+    pids="$(engine_pids)"
+    if [ "${pids:-0}" -gt 0 ] 2>/dev/null; then
+        ok "engine running ($pids processes) - buildings, training, adventures and bots are processed"
+    else
+        warn "the automation engine is NOT running."
+        warn "  Without it every countdown finishes and nothing happens (troops never"
+        warn "  arrive, hero adventures never resolve, buildings never complete)."
+        warn "  Check: $SCRIPT_NAME logs web   and   servers/$WORLD/include/automation.log"
+        warn "  Start: $SCRIPT_NAME engine start"
+    fi
 }
 
 verify_http() {
@@ -1525,16 +1580,25 @@ do_engine() {
     load_env_file
     check_docker
     case "${POSITIONAL[0]:-status}" in
-        start)
-            compose exec -T web bash -lc "TRAVIUM_UNDER_SYSTEMD=1 nohup php /var/www/app/servers/$WORLD/include/engine.php >>/tmp/engine.log 2>&1 & sleep 1; pgrep -fa 'AutomationEngine|engine.php' || true"
-            ok "engine start requested" ;;
+        start|restart)
+            restart_engine ;;
         stop)
-            compose exec -T web bash -lc "pkill -f 'AutomationEngine|engine.php' || true" && ok "engine stopped" ;;
+            compose exec -T web bash -lc "pkill -f 'AutomationEngine|include/engine.php' 2>/dev/null; rm -f /tmp/engine.pid; true" >/dev/null 2>&1 || true
+            ok "engine stopped - countdowns will now finish with nothing happening" ;;
         status)
-            compose exec -T web bash -lc "pgrep -fa 'AutomationEngine|engine.php' || echo 'engine is not running'" ;;
+            local pids
+            pids="$(engine_pids)"
+            if [ "${pids:-0}" -gt 0 ] 2>/dev/null; then
+                ok "engine running ($pids processes)"
+                compose exec -T web bash -lc "pgrep -fa 'include/engine.php' | head -n 5" 2>/dev/null | sed 's/^/    /'
+            else
+                warn "engine is NOT running"
+                warn "  buildings, troop training, hero adventures and the bots are not processed"
+                warn "  start it with: $SCRIPT_NAME engine start"
+            fi ;;
         logs)
-            compose exec -T web bash -lc "tail -n 80 /tmp/engine.log 2>/dev/null; tail -n 40 /var/www/app/servers/$WORLD/include/automation.log 2>/dev/null || true" ;;
-        *) die "engine: use start|stop|status|logs" ;;
+            compose exec -T web bash -lc "echo '--- /tmp/engine.log'; tail -n 60 /tmp/engine.log 2>/dev/null; echo '--- automation.log'; tail -n 40 /var/www/app/servers/$WORLD/include/automation.log 2>/dev/null || true" ;;
+        *) die "engine: use start|stop|restart|status|logs" ;;
     esac
 }
 
