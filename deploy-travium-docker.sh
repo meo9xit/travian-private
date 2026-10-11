@@ -26,6 +26,8 @@
 # Commands:
 #   install                    full deploy (default)
 #   install-world [--force]    only the world steps (new world or repair)
+#   set-port N                 move the whole install to another host port
+#                              (keeps the world data)
 #   up | down | restart | status | config | logs [service] | shell [service] | db
 #   engine start|stop|status|logs
 #   creds                      print urls and passwords
@@ -33,7 +35,9 @@
 #
 # Options:
 #   --host HOST       ip or domain players use (default: this machine's first ip)
-#   --port N          host port (default 80; use e.g. 8080 if 80 is taken)
+#   --port N          host port, any 1-65535. Default 80, or 443 with --tls.
+#                     Everything (game, /portal/, /api/, /cdn/) is served there,
+#                     so one open port is enough: --port 8080 -> http://host:8080/
 #   --src PATH        source tree (default: parent dir of this script)
 #   --deploy-dir PATH generated deployment files (default: <src>/../travium-deploy)
 #   --world ID        world folder + database name (default: game)
@@ -101,7 +105,7 @@ usage() { sed -n '2,56p' "$SCRIPT_DIR/$SCRIPT_NAME" | sed -e 's/^#\{1,2\}//' -e 
 # ---------------------------------------------------------------- parsing ----
 while [ $# -gt 0 ]; do
     case "$1" in
-        install|install-world|up|down|restart|logs|status|ps|creds|config|shell|db|engine|reset|uninstall|help)
+        install|install-world|set-port|port|up|down|restart|logs|status|ps|creds|config|shell|db|engine|reset|uninstall|help)
             COMMAND="$1"; shift ;;
         --host) HOST="${2:-}"; shift 2 ;;
         --port|--http-port) PORT="${2:-}"; shift 2 ;;
@@ -146,6 +150,60 @@ detect_host() {
     printf '%s' "$h"
 }
 
+# Work out the scheme, the port suffix and every absolute url from HOST/PORT/TLS.
+# Relative urls (assets, portal api, Register link) do not depend on this, so a
+# port change never breaks the pages a player clicks - only mail links and the
+# world list use these.
+compute_urls() {
+    SCHEME="http"; [ "$TLS" = "1" ] && SCHEME="https"
+    PORT_SUFFIX=":$PORT"
+    [ "$PORT" = "80" ] && PORT_SUFFIX=""
+    [ "$SCHEME" = "https" ] && [ "$PORT" = "443" ] && PORT_SUFFIX=""
+    BASE_URL="$SCHEME://$HOST$PORT_SUFFIX"
+    INDEX_URL="$BASE_URL/portal/"
+    GAME_WORLD_URL="$BASE_URL/"
+
+    # ip literal (v4/v6) or a name? Let's Encrypt cannot issue for an ip, and an
+    # ip is not a valid mail domain either.
+    case "$HOST" in
+        *[!0-9.]*) IS_IP=0; [ "${HOST#\[}" != "$HOST" ] && IS_IP=1 ;;
+        *) IS_IP=1 ;;
+    esac
+    if [ "$IS_IP" = "1" ]; then
+        MAIL_FROM="noreply@travium.local"
+    else
+        MAIL_FROM="noreply@$HOST"
+    fi
+}
+
+# Any port is allowed: validate_port <value>
+validate_port() {
+    case "${1:-}" in
+        ''|*[!0-9]*) die "--port must be a number (got '${1:-}')" ;;
+    esac
+    if [ "$1" -lt 1 ] || [ "$1" -gt 65535 ]; then
+        die "--port must be between 1 and 65535 (got $1)"
+    fi
+}
+
+# Warn (do not fail) when something already listens on the requested host port,
+# because that is the usual reason 'docker compose up' fails.
+warn_if_port_busy() {
+    local busy=0
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$PORT\$" && busy=1
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$PORT\$" && busy=1
+    fi
+    [ "$busy" = "1" ] && warn "something is already listening on port $PORT - pick another with --port, or stop that service"
+    return 0
+}
+
+# Read a value previously written to the deployment .env (used to keep the port
+# and the passwords of an existing deployment). Defined early because the paths
+# section below calls it.
+old_env() { [ -f "$DEPLOY_DIR/.env" ] && sed -n "s/^$1=//p" "$DEPLOY_DIR/.env" | head -n1 | sed -e 's/^"//' -e 's/"$//' || true; }
+
 # ------------------------------------------------------------------ paths ----
 if [ -z "$SRC_DIR" ]; then
     if [ -f "$SCRIPT_DIR/src/bootstrap.php" ]; then
@@ -165,34 +223,27 @@ if [ -z "$HOST" ]; then
     HOST="$(detect_host)"
 fi
 HOST="${HOST#http://}"; HOST="${HOST#https://}"; HOST="${HOST%%/*}"
-[ -n "$PORT" ] || PORT=80
 [ -n "$WORLD" ] || WORLD="game"
 WORLD="$(printf '%s' "$WORLD" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9-')"
 [ -n "$WORLD" ] || die "--world must contain [a-z0-9-]"
 [ -n "$DB_NAME" ] || DB_NAME="$WORLD"
 
-# ip literal (v4/v6) or a name? Let's Encrypt cannot issue for an ip.
-case "$HOST" in
-    *[!0-9.]*) IS_IP=0; [ "${HOST#\[}" != "$HOST" ] && IS_IP=1 ;;
-    *) IS_IP=1 ;;
-esac
-if [ "$TLS" = "1" ] && [ "$IS_IP" = "1" ]; then
-    die "--tls needs a real domain (Let's Encrypt cannot issue certificates for $HOST). Drop --tls and use http://$HOST:$PORT/"
+# Port: one port serves everything. Defaults to 80, or 443 with --tls (that is
+# where Caddy terminates HTTPS). Any other value works too, e.g.
+#   --port 8080   ->  http://host:8080/
+#   --tls --port 8443 -> https://host:8443/  (plus :80 for the ACME challenge)
+# An existing deployment keeps whatever port it was given, so re-running
+# 'install' (or 'set-port') does not silently move the site back to 80.
+if [ -z "$PORT" ] && [ "$(old_env TLS)" = "$TLS" ]; then
+    PORT="$(old_env PORT)"
 fi
-
-SCHEME="http"; [ "$TLS" = "1" ] && SCHEME="https"
-PORT_SUFFIX=""; [ "$PORT" != "80" ] && PORT_SUFFIX=":$PORT"
-BASE_URL="$SCHEME://$HOST$PORT_SUFFIX"
-# Absolute urls are only needed for the few places that cannot be relative
-# (mail templates, the world list). Everything a player clicks is relative.
-INDEX_URL="$BASE_URL/portal/"
-GAME_WORLD_URL="$BASE_URL/"
-# A syntactically valid From: address - an ip literal is not one, and PHPMailer
-# refuses to send with an invalid address.
-if [ "$IS_IP" = "1" ]; then
-    MAIL_FROM="noreply@travium.local"
-else
-    MAIL_FROM="noreply@$HOST"
+if [ -z "$PORT" ]; then
+    if [ "$TLS" = "1" ]; then PORT=443; else PORT=80; fi
+fi
+validate_port "$PORT"
+compute_urls
+if [ "$TLS" = "1" ] && [ "$IS_IP" = "1" ]; then
+    die "--tls needs a real domain (Let's Encrypt cannot issue a certificate for $HOST). Use http://$HOST:$PORT/ without --tls."
 fi
 
 # ---------------------------------------------------------------- helpers ----
@@ -213,7 +264,6 @@ sql_root()   { compose exec -T db mysql -uroot -p"$DB_ROOT_PASS" -e "$1"; }
 sql_db()     { compose exec -T db mysql -uroot -p"$DB_ROOT_PASS" "$1" -e "$2"; }
 sql_scalar() { compose exec -T db mysql -uroot -p"$DB_ROOT_PASS" -N -B "$1" -e "$2" 2>/dev/null | tr -d '\r'; }
 write_file() { local p="$1"; mkdir -p "$(dirname "$p")"; cat >"$p"; chmod 0644 "$p"; }
-old_env()    { [ -f "$DEPLOY_DIR/.env" ] && sed -n "s/^$1=//p" "$DEPLOY_DIR/.env" | head -n1 || true; }
 
 check_docker() {
     need_cmd docker
@@ -231,29 +281,30 @@ ensure_env_file() {
 
     write_file "$DEPLOY_DIR/.env" <<EOF
 # Generated by $SCRIPT_NAME - keep this file: it holds the passwords.
-HOST=$HOST
-PORT=$PORT
-SCHEME=$SCHEME
-TLS=$TLS
-ACME_EMAIL=$ACME_EMAIL
-BASE_URL=$BASE_URL
-INDEX_URL=$INDEX_URL
-GAME_WORLD_URL=$GAME_WORLD_URL
-MAIL_FROM=$MAIL_FROM
-WORLD=$WORLD
-WORLD_DIR=$SRC_DIR/servers/$WORLD
-SRC_DIR=$SRC_DIR
-MAP_SIZE=$MAP_SIZE
-SPEED=$SPEED
-ROUND_LENGTH=$ROUND_LENGTH
-START_TIME=$START_TIME
-ADMIN_EMAIL=$ADMIN_EMAIL
-DB_ROOT_PASS=$DB_ROOT_PASS
-DB_NAME=$DB_NAME
-DB_USER=$DB_USER
-DB_PASS=$DB_PASS
-PHP_IMAGE_TAG=$PHP_IMAGE_TAG
-ENGINE=$ENGINE
+# Sourced by load_env_file(), so every value is shell-quoted.
+HOST="$HOST"
+PORT="$PORT"
+SCHEME="$SCHEME"
+TLS="$TLS"
+ACME_EMAIL="$ACME_EMAIL"
+BASE_URL="$BASE_URL"
+INDEX_URL="$INDEX_URL"
+GAME_WORLD_URL="$GAME_WORLD_URL"
+MAIL_FROM="$MAIL_FROM"
+WORLD="$WORLD"
+WORLD_DIR="$SRC_DIR/servers/$WORLD"
+SRC_DIR="$SRC_DIR"
+MAP_SIZE="$MAP_SIZE"
+SPEED="$SPEED"
+ROUND_LENGTH="$ROUND_LENGTH"
+START_TIME="$START_TIME"
+ADMIN_EMAIL="$ADMIN_EMAIL"
+DB_ROOT_PASS="$DB_ROOT_PASS"
+DB_NAME="$DB_NAME"
+DB_USER="$DB_USER"
+DB_PASS="$DB_PASS"
+PHP_IMAGE_TAG="$PHP_IMAGE_TAG"
+ENGINE="$ENGINE"
 EOF
     chmod 0600 "$DEPLOY_DIR/.env"
     ok "settings      $DEPLOY_DIR/.env"
@@ -435,12 +486,16 @@ EOF
 }
 
 gen_compose() {
+    # 'ports' must stay a valid YAML list, so in TLS mode the web container gets
+    # an explicit empty list instead of a comment-only block.
     local ports_block
     if [ "$TLS" = "1" ]; then
-        ports_block="      # Published only for direct/ip access; Caddy owns 80/443.
-      - '${PORT}:80'"
+        # Caddy owns the published ports: nothing is exposed for the web
+        # container (that also leaves $PORT free for the HTTPS listener, so
+        # --port 443 does not clash with port 80).
+        ports_block="      []   # with --tls Caddy publishes $PORT (https) + 80 (ACME); it proxies web:80"
     else
-        ports_block="      - '${PORT}:80'"
+        ports_block="      - '${PORT}:80'   # everything: /  /portal/  /api/  /cdn/"
     fi
     write_file "$DEPLOY_DIR/docker-compose.yml" <<EOF
 # Generated by $SCRIPT_NAME - host=$HOST port=$PORT world=$WORLD
@@ -504,6 +559,11 @@ $ports_block
         apache2-foreground
 EOF
     if [ "$TLS" = "1" ]; then
+        # Publish the HTTPS listener on --port (443 by default) and 80 for the
+        # ACME HTTP challenge / http->https redirect.
+        local tls_ports="      - '${PORT}:${PORT}'"
+        [ "$PORT" != "80" ] && tls_ports="$tls_ports
+      - '80:80'"
         cat >>"$DEPLOY_DIR/docker-compose.yml" <<EOF
 
   caddy:
@@ -513,9 +573,7 @@ EOF
     depends_on:
       - web
     ports:
-      - '80:80'
-      - '443:443'
-      - '443:443/udp'
+$tls_ports
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -533,15 +591,19 @@ EOF
 
 gen_caddyfile() {
     [ "$TLS" = "1" ] || return 0
+    # Caddy listens on the port in its site address: 443 (implied) or whatever
+    # --port was set to, so https://host:8443/ works too.
+    local site="$HOST"
+    [ "$PORT" != "443" ] && site="$HOST:$PORT"
     write_file "$DEPLOY_DIR/Caddyfile" <<EOF
 # Automatic HTTPS for the whole install. Every path (/portal/, /api/, /cdn/)
 # goes to the same Apache container, which is why one certificate is enough.
-# $HOST must resolve here and ports 80/443 must be reachable.
+# $HOST must resolve here and ports 80 and $PORT must be reachable.
 {
     email ${ACME_EMAIL:-admin@$HOST}
 }
 
-$HOST {
+$site {
     encode zstd gzip
     reverse_proxy web:80 {
         header_up X-Forwarded-Proto {scheme}
@@ -549,7 +611,7 @@ $HOST {
     }
 }
 EOF
-    ok "Caddyfile     automatic HTTPS for $HOST"
+    ok "Caddyfile     automatic HTTPS on $HOST:$PORT"
 }
 
 gen_global_config() {
@@ -725,7 +787,7 @@ $config->extraSettings->generalOptions->finishTraining->enabled = true;
 $config->extraSettings->generalOptions->buyAdventure->enabled = true;
 EOF
 
-    : >"$world_dir/include/error_log.log"
+    [ -f "$world_dir/include/error_log.log" ] || : >"$world_dir/include/error_log.log"
     ok "world         $world_dir"
 }
 
@@ -875,25 +937,34 @@ run_world_installer() {
 verify_http() {
     step "verification"
     local failed=0
-    check_url() { # <label> <path> <expect-substring|->
-        local label="$1" path="$2" expect="$3" body code
-        body="$(curl -fsS --max-time 25 "http://127.0.0.1:$PORT$path" 2>/dev/null || true)"
-        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 "http://127.0.0.1:$PORT$path" 2>/dev/null || echo 000)"
-        if [ "$code" = "200" ] && { [ "$expect" = "-" ] || printf '%s' "$body" | grep -q -- "$expect"; }; then
-            ok "$label   HTTP $code"
+
+    # Nothing is published for the web container when Caddy fronts it, so in TLS
+    # mode ask the app from inside the container instead of from the host.
+    http_body() { # <path>
+        if [ "$TLS" = "1" ]; then
+            compose exec -T web php -r "echo @file_get_contents('http://127.0.0.1$1') ?: '';" 2>/dev/null || true
         else
-            warn "$label   HTTP $code"
+            curl -fsS --max-time 25 "http://127.0.0.1:$PORT$1" 2>/dev/null || true
+        fi
+    }
+    check_url() { # <label> <path> <expect-substring|->
+        local label="$1" path="$2" expect="$3" body
+        body="$(http_body "$path")"
+        if [ -n "$body" ] && { [ "$expect" = "-" ] || printf '%s' "$body" | grep -q -- "$expect"; }; then
+            ok "$label   ok"
+        else
+            warn "$label   no usable response on $path"
             failed=1
         fi
     }
-    check_url "game  " "/"                                        "Travian"     "$HOST_GAME"
-    check_url "portal" "/portal/"                                 "app-root"    "$HOST_PORTAL"
-    check_url "api   " "/api/v1/loadConfig"                       "defaultLang" "$HOST_API"
-    check_url "cdn   " "/cdn/a17a8f72/mainPage/lang/en-US/compact.css" "-"      "$HOST_CDN"
-    check_url "register" "/anmelden.php"                          "-"           ""
+    check_url "game    " "/"                                        "Travian"
+    check_url "portal  " "/portal/"                                 "app-root"
+    check_url "api     " "/api/v1/loadConfig"                       "defaultLang"
+    check_url "cdn     " "/cdn/a17a8f72/mainPage/lang/en-US/compact.css" "-"
+    check_url "register" "/anmelden.php"                            "actor"
 
     if [ "$TLS" = "1" ]; then
-        log "Caddy needs ports 80 and 443 open, and DNS for $HOST must point here"
+        log "HTTPS is served by Caddy: $BASE_URL/  (DNS for $HOST must point here, ports 80 and $PORT open)"
     fi
     [ "$failed" = "0" ] || warn "some checks failed - inspect: $SCRIPT_NAME logs web"
 }
@@ -924,6 +995,7 @@ ${C_BOLD}Deployment ready${C_RESET}
     $SCRIPT_NAME logs web            follow the web logs
     $SCRIPT_NAME creds               urls + passwords
     $SCRIPT_NAME engine status       automation daemon
+    $SCRIPT_NAME set-port 9000       move everything to another port (keeps the world)
     $SCRIPT_NAME install --host X    repoint the absolute urls (mail links) at another address
     $SCRIPT_NAME install-world --force   rebuild this world from scratch
 
@@ -959,8 +1031,10 @@ do_install() {
     gen_all_files
     if [ "$DRY_RUN" = "1" ]; then
         ok "dry run - files are in $DEPLOY_DIR, Docker was not touched"
+        ok "would serve everything on $BASE_URL/ (port $PORT)"
         return 0
     fi
+    warn_if_port_busy
     start_stack
     wait_for_db
     create_databases
@@ -1023,6 +1097,39 @@ do_reset() {
     ok "removed - '$SCRIPT_NAME install' deploys it again"
 }
 
+# Change the port (or any other generated setting) without touching the world
+# data: regenerate the files, recreate the container with the new mapping, point
+# the absolute urls at the new address and verify.
+do_set_port() {
+    # Take the requested port before load_env_file() sources .env (which would
+    # otherwise overwrite it with the current value).
+    local req_port="${POSITIONAL[0]:-}"
+    [ -n "$req_port" ] || req_port="$PORT"
+    load_env_file
+    check_docker
+    PORT="$req_port"
+    [ -n "$PORT" ] || die "usage: $SCRIPT_NAME set-port <port>   (e.g. $SCRIPT_NAME set-port 9000)"
+    validate_port "$PORT"
+    compute_urls
+    if [ "$TLS" = "1" ] && [ "$IS_IP" = "1" ]; then
+        die "--tls is enabled but HOST=$HOST is an ip - rerun '$SCRIPT_NAME install --host <domain> --tls' instead"
+    fi
+    warn_if_port_busy
+    gen_all_files
+    if [ "$DRY_RUN" = "1" ]; then
+        ok "dry run - files are in $DEPLOY_DIR, Docker was not touched"
+        ok "would serve everything on $BASE_URL/ (port $PORT)"
+        return 0
+    fi
+    load_env_file                     # pick up the freshly written .env
+    step "applying the new port"
+    compose up -d
+    wait_for_db
+    register_world
+    verify_http
+    print_summary
+}
+
 do_engine() {
     load_env_file
     check_docker
@@ -1044,6 +1151,7 @@ do_engine() {
 case "$COMMAND" in
     install)         do_install ;;
     install-world)   do_install_world ;;
+    set-port|port)   do_set_port ;;
     up)              load_env_file; check_docker; compose up -d ;;
     down)            load_env_file; check_docker; compose down ;;
     restart)         load_env_file; check_docker; compose restart ;;
