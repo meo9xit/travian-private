@@ -1488,6 +1488,8 @@ CREATE TABLE IF NOT EXISTS `users`
   `qst_battle`                                       VARCHAR(50)           NOT NULL DEFAULT '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0',
   `gift_gold`                                        INT(11)               NOT NULL DEFAULT '0',
   `bought_gold`                                      INT(11)               NOT NULL DEFAULT '0',
+  `autoRaidPaid`                                     INT(11)               NOT NULL DEFAULT '0' COMMENT 'paid auto raid: purchase time, 0 = not bought',
+  `autoRaidMinutes`                                  SMALLINT(5) UNSIGNED  NOT NULL DEFAULT '0' COMMENT 'paid auto raid: interval chosen by the player',
   `silver`                                           INT(11)               NOT NULL DEFAULT '0',
   `plus`                                             INT(11) UNSIGNED      NOT NULL DEFAULT '0',
   `b1`                                               INT(11) UNSIGNED      NOT NULL DEFAULT '0',

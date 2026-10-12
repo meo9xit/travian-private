@@ -12,6 +12,7 @@ use Game\Formulas;
 use Game\SpeedCalculator;
 use function miliseconds;
 use Model\ArtefactsModel;
+use Model\AutoRaidModel;
 use Model\FarmListModel;
 use Model\MovementsModel;
 use Model\OasesModel;
@@ -29,6 +30,74 @@ require_once INCLUDE_PATH . "Plugins/securimage/securimage.php";
 
 class FarmList
 {
+    /**
+     * The paid auto raid panel: buy it for gold (once per round) and pick how
+     * often it should hit the farm lists. Rendered above the lists themselves.
+     */
+    private function autoRaidPanel()
+    {
+        $model = new AutoRaidModel();
+        if (!$model->isEnabled()) {
+            return '';
+        }
+        $model->ensureSchema();
+        $uid = Session::getInstance()->getPlayerId();
+        $active = $model->isActive($uid);
+        $minutes = $model->getMinutes($uid);
+        $price = $model->getPrice();
+        $gold = $model->getGold($uid);
+        $options = '';
+        foreach ([5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, 1440] as $m) {
+            $options .= '<option value="' . $m . '"' . ($m == $minutes ? ' selected' : '') . '>' . $m . '</option>';
+        }
+        $html = '<div id="autoRaidPremium" class="autoRaidPremium" style="margin-bottom: 8px;">';
+        $html .= '<center><h4 class="round" style="background-color: #CCFFCC;">';
+        if ($active) {
+            $html .= sprintf(T("FarmList", "autoRaidActive"), $minutes);
+        } else {
+            $html .= sprintf(T("FarmList", "autoRaidOffer"), $price);
+        }
+        $html .= '</h4></center>';
+        $html .= '<div style="padding: 4px 8px;">';
+        $html .= '<span>' . T("FarmList", "autoRaidEvery") . ' </span>';
+        $html .= '<select id="autoRaidMinutes">' . $options . '</select> ';
+        $html .= '<span>' . T("FarmList", "autoRaidMinutes") . '</span> ';
+        if ($active) {
+            $html .= getButton([
+                "type" => "button", "value" => "save", "class" => "green ",
+                "onclick" => "autoRaidPremiumSave();",
+            ], [], T("FarmList", "autoRaidSave"));
+        } else {
+            $html .= getButton([
+                "type" => "button", "value" => "buy", "class" => "gold ",
+                "onclick" => "autoRaidPremiumBuy();",
+            ], [], sprintf(T("FarmList", "autoRaidBuy"), $price));
+        }
+        $html .= ' <span class="autoRaidGold">' . sprintf(T("FarmList", "autoRaidYourGold"), $gold) . '</span>';
+        $html .= '<div id="autoRaidMsg" style="margin-top: 4px;"></div>';
+        $html .= '</div>';
+        $html .= '<script type="text/javascript">
+            function autoRaidPremiumCall(action, done) {
+                Travian.ajax({
+                    data: {
+                        cmd: "autoRaidPremium",
+                        action: action,
+                        minutes: document.getElementById("autoRaidMinutes").value
+                    },
+                    onSuccess: function (a) { done(a); window.location.reload(); },
+                    onFailure: function (e) {
+                        document.getElementById("autoRaidMsg").innerHTML =
+                            "<span style=\'color: red;\'>" + (e.errorMsg || "error") + "</span>";
+                    }
+                });
+            }
+            function autoRaidPremiumBuy() { autoRaidPremiumCall("buy"); }
+            function autoRaidPremiumSave() { autoRaidPremiumCall("minutes"); }
+        </script>';
+        $html .= '</div>';
+        return $html;
+    }
+
     private function _showFarmLists()
     {
         $m = new FarmListModel();
@@ -44,6 +113,7 @@ class FarmList
                     Config::getProperty("gold", "autoRaidSilver"),
                     Config::getProperty("game", "autoRaidInterval")) . '</h4></center>';
         }
+        $content .= $this->autoRaidPanel();
         $content .= '<div id="raidList">';
         $view = new PHPBatchView("farmlist/showFarmlist");
         $raids = ['lid' => 0, 'num' => 0, 'err' => FALSE, 'err2' => false];

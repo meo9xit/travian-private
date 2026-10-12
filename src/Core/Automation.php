@@ -16,6 +16,7 @@ use function microtime;
 use Model\AccountDeleter;
 use Model\AllianceBonusModel;
 use Model\ArtefactsModel;
+use Model\AutoRaidModel;
 use Model\AutomationModel;
 use Model\BattleModel;
 use Model\ClubApi;
@@ -69,6 +70,10 @@ class Automation
     {
         $m = new FarmListModel();
         $m->processAutoRaid();
+        // Paid auto raid: no silver, interval chosen by the player, lasts for the
+        // rest of the round. Independent of the stock silver based feature.
+        $premium = new AutoRaidModel();
+        $premium->processPremiumAutoRaid();
     }
 
     public function buildComplete()

@@ -999,6 +999,13 @@ $config->custom->allowInterruptionInGame = true;
 // --- premium features players can buy with gold -------------------------
 // The stock config leaves most of these off (buyResources/buyTroops/buyAnimal
 // are even force-disabled below 1000x speed), so enable them here.
+//
+// Paid auto raid: the player pays autoRaidGold once and from then on every
+// village marked in any of their farm lists is attacked automatically, every N
+// minutes (N is the player's choice, 5..1440), for the rest of the round.
+// The panel appears on the farm list page (build.php?gid=16&tt=99).
+$config->custom->autoRaidPremiumEnabled = true;
+$config->gold->autoRaidGold = 250;
 $config->extraSettings->buyResources['enabled'] = true;   // buy resources
 $config->extraSettings->buyTroops['enabled'] = true;      // buy troops
 $config->extraSettings->buyAnimal['enabled'] = true;      // buy animals

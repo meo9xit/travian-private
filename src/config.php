@@ -198,6 +198,7 @@ $config = (object)[
         'vacationAbortGold'              => 10, //default: 10
         'invitePlayerGold'               => 20, //default: 10
         'autoRaidSilver'                 => 20,
+        'autoRaidGold'                   => 250, // paid auto raid, whole round
         'voucherTaxPercent'              => 10,
         'voucherExpireDays'              => 90,
         'changeName'                     => (object)[
@@ -253,6 +254,10 @@ $config = (object)[
         'protectFarmsTill'                        => 0,
         'delayAuctions'                           => false,
         'autoRaidEnabled'                         => false,
+        // Paid auto raid: the player spends gold once and every village marked in
+        // any of their farm lists is raided automatically, every N minutes (N is
+        // the player's choice), for the rest of the round. Price: gold->autoRaidGold.
+        'autoRaidPremiumEnabled'                  => false,
         'startMedalsAtStartOfWeek'                => false,
         'realCancelAttack'                        => true,
         'makeAuctionsCheaperInSell'               => false,

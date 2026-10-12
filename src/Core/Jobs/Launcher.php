@@ -56,7 +56,7 @@ class Launcher
             $job = [Automation::getInstance(), 'buildComplete'];
             $jobs[] = new Job('buildComplete:buildComplete', 1, $job);
         }
-        if(getCustom('autoRaidEnabled')){
+        if (getCustom('autoRaidEnabled') || getCustom('autoRaidPremiumEnabled')) {
             {
                 $job = [Automation::getInstance(), 'autoFarmlist'];
                 $jobs[] = new Job('autoFarmlist', 30, $job);

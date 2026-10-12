@@ -400,7 +400,14 @@ class FarmListModel
         }
     }
 
-    public function autoRaidFarmList($lid, $owner, $kid)
+    /**
+     * @param bool $premium paid auto raid (gold, whole round): no silver is
+     *                       charged, and the owner's own protection state is used
+     *                       instead of the session's - in the automation engine
+     *                       there is no player session, so Session::hasProtection()
+     *                       would answer for the wrong account.
+     */
+    public function autoRaidFarmList($lid, $owner, $kid, $premium = false)
     {
         $miliseconds = miliseconds();
         $success = 0;
@@ -415,7 +422,10 @@ class FarmListModel
         if (!$user->num_rows) return $success;
         $user = $user->fetch_assoc();
         $race = $user['race'];
-        if ($user['silver'] < Config::getProperty("gold", "autoRaidSilver")) {
+        $hasProtection = $premium
+            ? ($user['protection'] > time())
+            : Session::getInstance()->hasProtection();
+        if (!$premium && $user['silver'] < Config::getProperty("gold", "autoRaidSilver")) {
             return $success;
         }
         if ($user['vacationActiveTil'] > time()) {
@@ -428,10 +438,10 @@ class FarmListModel
             $calc->hasCata($row['u8'] > 0);
             $canRaid = TRUE;
             $speeds = [];
-            if (!$this->checkToFarmListPermissions($row['kid'], Session::getInstance()->hasProtection())) {
+            if (!$this->checkToFarmListPermissions($row['kid'], $hasProtection)) {
                 continue;
             }
-            if ($user['protection'] > time() && !$this->isNatarOrUnOccupiedOasis($row['kid'])) {
+            if ($hasProtection && !$this->isNatarOrUnOccupiedOasis($row['kid'])) {
                 continue;
             }
             $unitsToSend = array_fill(1, 11, 0);
