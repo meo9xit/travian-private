@@ -219,6 +219,15 @@ class RegisterModel
         $maxRes = 800 * getGame("storage_multiplier");
         $minRes = ceil($maxRes * 0.9375);
         $fieldType = $db->fetchScalar("SELECT fieldtype FROM wdata WHERE id=$kid");
+        // A new village is inserted with the population it already has (the main
+        // building it is created with, see addResourceFields()). Inserting it at
+        // pop 0 made the village look like a dead/zero-pop village for as long as
+        // the rest of the founding took (18 resource fields are levelled right
+        // after this), and Automation::zeroPopVillages() - a separate engine
+        // thread - deletes any player village with pop<=0. Villages therefore
+        // sometimes disappeared a few seconds after the settlers founded them.
+        list($startPop, $startCp) = Formulas::buildingCpPop(15, 0, 1, false);
+        $startPop = max((int)$startPop, 2);
         $row = vsprintf("'%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s'",
             [
                 $kid,
@@ -226,8 +235,8 @@ class RegisterModel
                 $fieldType,
                 $village_name,
                 $capital ? 1 : 0,
-                0,
-                0,
+                $startPop,
+                (int)$startCp,
                 $minRes,
                 $minRes,
                 $minRes,
@@ -383,7 +392,15 @@ class RegisterModel
             false
         );
         if (!$result) return false;
-        $this->addResourceFields($kid);
+        if (!$this->addResourceFields($kid)) {
+            // No field data means the village is not usable: Core\Village
+            // deletes it again on the next page load ("Field data not found for
+            // village ... Fixing..."). Undo the founding so the caller can tell
+            // the player it failed instead of reporting a village that no longer
+            // exists a moment later.
+            $this->undoNewVillage($uid, $kid);
+            return false;
+        }
         $this->populateBuildingLevels($kid, getGame("otherVillageCreationFieldsLevel"));
         if (Formulas::isGrayArea($kid)) {
             $m = new NatarsModel();
@@ -396,6 +413,26 @@ class RegisterModel
         ResourcesHelper::updateVillageResources($kid, false);
         $db->query("UPDATE users SET kid=$kid WHERE id=$uid");
         return true;
+    }
+
+    /**
+     * Removes a village that was inserted by _createVillage() but could not be
+     * finished, and frees its spot on the map again.
+     */
+    private function undoNewVillage($uid, $kid)
+    {
+        $db = DB::getInstance();
+        $db->query("DELETE FROM fdata WHERE kid=$kid");
+        $db->query("DELETE FROM units WHERE kid=$kid");
+        $db->query("DELETE FROM tdata WHERE kid=$kid");
+        $db->query("DELETE FROM smithy WHERE kid=$kid");
+        $db->query("DELETE FROM vdata WHERE kid=$kid");
+        if ($db->affectedRows()) {
+            $db->query("UPDATE wdata SET occupied=0 WHERE id=$kid");
+            $db->query("UPDATE available_villages SET occupied=0 WHERE kid=$kid");
+            Map::villageDestroyOrCaptureOrNewVillageUpdate($kid);
+            ErrorHandler::getInstance()->log("createNewVillage rolled back: uid=" . $uid . ", kid=" . $kid);
+        }
     }
 
     public function createNewNatarVillage($kid, $isCapital = false)

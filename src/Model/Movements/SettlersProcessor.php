@@ -53,13 +53,23 @@ class SettlersProcessor
             return;
         }
         CulturePointsHelper::updateUserCP($owner);
-        list($cp, $total_villages, $aid, $name) = $db->query("SELECT cp, total_villages, aid, name FROM users WHERE id=$owner")->fetch_row();
+        list($cp, , $aid, $name) = $db->query("SELECT cp, total_villages, aid, name FROM users WHERE id=$owner")->fetch_row();
+        // Same threshold as RallyPoint::procSettlers() (the real village count,
+        // not users.total_villages - the two drift apart and then settlers the
+        // player was allowed to send are sent home again on arrival).
+        $total_villages = (int)$db->fetchScalar("SELECT COUNT(kid) FROM vdata WHERE owner=$owner");
         if ($cp < Formulas::newVillageCP($total_villages + 1)) {
             $this->returnSettlers($row, $owner);
             return;
         }
         $register = new RegisterModel();
-        $register->createNewVillage($owner, $race, $row['to_kid'], $row['kid']);
+        if (!$register->createNewVillage($owner, $race, $row['to_kid'], $row['kid'])) {
+            // The village was not founded - give the settlers (and their
+            // resources) back and do not tell the player it worked.
+            ErrorHandler::getInstance()->log("SettlersProcessor: founding a new village failed (uid=" . $owner . ", from=" . $row['kid'] . ", at=" . $row['to_kid'] . ")");
+            $this->returnSettlers($row, $owner);
+            return;
+        }
 
         (new SummaryModel())->setFirstVillageUser($name);
 

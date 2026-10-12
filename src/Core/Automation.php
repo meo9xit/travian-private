@@ -218,7 +218,17 @@ class Automation
     public function zeroPopVillages()
     {
         $db = DB::getInstance();
-        $result = $db->query("SELECT kid, owner FROM vdata WHERE pop<=0 AND isWW=0 LIMIT 50");
+        // A village that is still being founded must never be collected here:
+        // RegisterModel inserts the row (now with its starting population) and
+        // levels its fields right after, while this job runs in another engine
+        // thread. Give freshly created villages a grace period - otherwise a
+        // village founded by settlers could be deleted again seconds later,
+        // which looked like "settlers founded a new village" with no village.
+        // Villages whose founding never finished (no field data at all, see
+        // RegisterModel::createNewVillage) are collected here as well, which is
+        // what Core\Village does when such a village is opened.
+        $result = $db->query("SELECT v.kid, v.owner FROM vdata v LEFT JOIN fdata f ON f.kid=v.kid
+                              WHERE (v.pop<=0 OR f.kid IS NULL) AND v.isWW=0 AND v.created <= " . (time() - 60) . " LIMIT 50");
         $accountDeleter = new AccountDeleter();
         while ($row = $result->fetch_assoc()) {
             if (true === $accountDeleter->isVillageDestroyAble(0, $row['kid'], $row['owner'])) {
