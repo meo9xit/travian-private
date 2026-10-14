@@ -49,6 +49,9 @@ class BotWarModel
     /** Gold spending run at most once per this many seconds. */
     const GOLD_COOLDOWN = 3600;
 
+    /** A scout report stays valid for this long before the bot spies again. */
+    const SCOUT_VALIDITY = 6 * 3600;
+
     private static $schemaChecked = false;
 
     public function isEnabled()
@@ -95,6 +98,14 @@ class BotWarModel
         if (!$db->fetchScalar("SHOW COLUMNS FROM users LIKE 'botDefendUntil'")) {
             $db->query("ALTER TABLE users ADD COLUMN `botDefendUntil` INT(11) NOT NULL DEFAULT '0'");
         }
+        // Which villages this bot has already scouted (and when), so it spies on a
+        // player once and then attacks instead of spying forever.
+        $db->query("CREATE TABLE IF NOT EXISTS bot_scout (
+                        uid INT(11) NOT NULL,
+                        to_kid INT(6) NOT NULL,
+                        scout_time INT(11) NOT NULL DEFAULT '0',
+                        PRIMARY KEY (uid, to_kid)
+                    ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4");
     }
 
     // ------------------------------------------------------------- raiding ----
@@ -175,6 +186,17 @@ class BotWarModel
             if ($sent >= $budget) {
                 break;
             }
+            // Scout a real player before hitting him: the report is what the
+            // player sees first ("someone is watching me"), and it is also how a
+            // bot is supposed to know what it is walking into. Farms and other
+            // bots are cheap enough to attack directly.
+            if ($this->shouldScoutFirst($owner, $target)) {
+                if ($this->sendSpy($kid, $target['kid'], $owner, $race)) {
+                    $this->rememberScout($owner, $target['kid']);
+                }
+                // One action per round: the raid follows once the report is in.
+                break;
+            }
             $defence = $this->estimateDefence($target['kid']);
             if ($ourOffence < $defence * self::MIN_OFFENCE_RATIO) {
                 // Not worth it (yet): leave this target for a stronger day.
@@ -190,6 +212,102 @@ class BotWarModel
             break;
         }
         return $sent;
+    }
+
+    /**
+     * Is this a target the bot should spy on before attacking, and has it not
+     * done so recently? Only real players (not Natar farms, not other bots) are
+     * worth the scout.
+     */
+    private function shouldScoutFirst($owner, array $target)
+    {
+        if ($target['isFarm'] == 1 || (int)$target['owner_access'] == 3 || (int)$target['owner'] <= 1) {
+            return false;
+        }
+        $db = DB::getInstance();
+        $last = (int)$db->fetchScalar("SELECT scout_time FROM bot_scout
+                                       WHERE uid=" . (int)$owner . " AND to_kid=" . (int)$target['kid']);
+        return $last + self::SCOUT_VALIDITY <= time();
+    }
+
+    private function rememberScout($owner, $toKid)
+    {
+        $db = DB::getInstance();
+        $db->query("REPLACE INTO bot_scout (uid, to_kid, scout_time) VALUES ("
+            . (int)$owner . ", " . (int)$toKid . ", " . time() . ")");
+    }
+
+    /**
+     * The tribe's scout: the unit that cannot attack (offence 0) but is the
+     * fastest. Roman and Teuton keep it in slot 4, Gaul in slot 3 - picking it by
+     * the game's own numbers avoids hardcoding that.
+     */
+    public function pickScoutSlot($race)
+    {
+        $best = 0;
+        $bestSpeed = -1;
+        for ($nr = 1; $nr <= 10; ++$nr) {
+            $stats = BattleModel::unitCombatStats($race, $nr);
+            if ($stats['off'] > 0) {
+                continue; // a fighting unit is not a scout
+            }
+            $speed = Formulas::uSpeed(nrToUnitId($nr, $race));
+            if ($speed > $bestSpeed) {
+                $bestSpeed = $speed;
+                $best = $nr;
+            }
+        }
+        return $best;
+    }
+
+    /**
+     * One scout, spyType 0 (military intelligence: wall + troops, which is what
+     * BattleModel puts in the report for that value).
+     */
+    public function sendSpy($fromKid, $toKid, $owner, $race)
+    {
+        $db = DB::getInstance();
+        $scoutNr = $this->pickScoutSlot($race);
+        if ($scoutNr <= 0) {
+            return false;
+        }
+        $units = $db->query("SELECT * FROM units WHERE kid=$fromKid")->fetch_assoc();
+        if (!$units || (int)$units['u' . $scoutNr] <= 0) {
+            return false;
+        }
+        $farmList = new FarmListModel();
+        $calc = new SpeedCalculator();
+        $calc->setTournamentSqLvl($farmList->getTournamentSqLvl($fromKid));
+        $calc->setArtefactEffect(ArtefactsModel::getArtifactEffectByType($owner, $fromKid, ArtefactsModel::ARTIFACT_INCREASE_SPEED));
+        $calc->setFrom($fromKid);
+        $calc->hasCata(false);
+        $calc->setTo($toKid);
+        $calc->setMinSpeed([Formulas::uSpeed(nrToUnitId($scoutNr, $race))]);
+        $seconds = $calc->calc();
+        if ($seconds > $this->maxTravelSeconds()) {
+            return false;
+        }
+        $unitsToSend = array_fill(1, 11, 0);
+        $unitsToSend[$scoutNr] = 1;
+        if (!Units::modifyUnits($fromKid, $unitsToSend)) {
+            return false;
+        }
+        $miliseconds = miliseconds();
+        $move = new MovementsModel();
+        $result = $move->addMovement($fromKid,
+            $toKid,
+            $race,
+            $unitsToSend,
+            0,
+            0,
+            0, // spyType 0: wall and troops
+            0,
+            0,
+            MovementsModel::ATTACKTYPE_SPY,
+            $miliseconds,
+            $miliseconds + 1000 * $seconds);
+        Log::addLog($owner, "botWar:spy", sprintf("from %s to %s", $fromKid, $toKid));
+        return (bool)$result;
     }
 
     /**
