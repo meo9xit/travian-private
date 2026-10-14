@@ -1219,14 +1219,23 @@ run_world_installer() {
 # first deploy) kills it - and then every countdown reaches zero and nothing
 # happens. So: (re)start it once the world is installed, and say so loudly if it
 # is not up.
+#
+# Only php processes running engine.php match. The container's supervisor is a
+# bash subshell whose command line also contains the path, so the pattern is
+# anchored to the beginning of the command line - a broader one killed the
+# supervisor together with the engine, leaving nothing to restart it.
+engine_pattern() {
+    printf '^php .*include/engine\\.php'
+}
+
 engine_pids() {
-    compose exec -T web bash -lc "pgrep -f 'AutomationEngine|include/engine.php' 2>/dev/null | wc -l" 2>/dev/null | tr -d '\r' || echo 0
+    compose exec -T web bash -lc "pgrep -f '$(engine_pattern)' 2>/dev/null | wc -l" 2>/dev/null | tr -d '\r' || echo 0
 }
 
 restart_engine() {
     [ "$ENGINE" = "1" ] || { log "automation engine disabled (--no-engine)"; return 0; }
     step "automation engine"
-    compose exec -T web bash -lc "pkill -f 'AutomationEngine|include/engine.php' 2>/dev/null; sleep 1; rm -f /tmp/engine.pid; true" >/dev/null 2>&1 || true
+    compose exec -T web bash -lc "pkill -f '$(engine_pattern)' 2>/dev/null; sleep 1; rm -f /tmp/engine.pid; true" >/dev/null 2>&1 || true
     compose exec -T web bash -lc "
         cd /var/www/app
         setsid env TRAVIUM_UNDER_SYSTEMD=1 php '/var/www/app/servers/$WORLD/include/engine.php' >>/tmp/engine.log 2>&1 < /dev/null &
@@ -1544,7 +1553,7 @@ do_bots() {
     step "creating $n fake player(s)"
     compose exec -T web php "/var/www/app/servers/$WORLD/include/make-bots.php" "$n"
     ok "done - see statistiken.php (Show fake users) or the map for the new villages"
-    if ! compose exec -T web bash -lc "pgrep -f 'AutomationEngine|engine.php' >/dev/null" 2>/dev/null; then
+    if [ "$(engine_pids)" = "0" ]; then
         warn "the automation engine is not running, so the bots will not grow."
         warn "start it with: $SCRIPT_NAME engine start"
     fi
@@ -1590,8 +1599,10 @@ do_engine() {
         start|restart)
             restart_engine ;;
         stop)
-            compose exec -T web bash -lc "pkill -f 'AutomationEngine|include/engine.php' 2>/dev/null; rm -f /tmp/engine.pid; true" >/dev/null 2>&1 || true
-            ok "engine stopped - countdowns will now finish with nothing happening" ;;
+            compose exec -T web bash -lc "pkill -f '$(engine_pattern)' 2>/dev/null; rm -f /tmp/engine.pid; true" >/dev/null 2>&1 || true
+            warn "engine stopped - countdowns will now finish with nothing happening"
+            warn "  the container's supervisor will start it again within 15 seconds;"
+            warn "  to keep it down, start the stack with --no-engine instead" ;;
         status)
             local pids
             pids="$(engine_pids)"

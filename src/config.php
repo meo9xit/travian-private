@@ -157,6 +157,11 @@ $config = (object)[
         'vacationDays'                         => 21,
         'farmListInterval'                     => 30,
         'autoRaidInterval'                     => 60,
+    // Bot raids: how far a bot looks for targets, the longest travel time it
+    // accepts, and how often the same bot may send a raid round.
+    'botMaxRaidDistance'                   => 60,
+    'botMaxRaidTravelSeconds'               => 8 * 3600,
+    'botRaidCooldownSeconds'                => 900,
         'useMilSeconds'                        => FALSE,
         'useNanoseconds'                       => FALSE,
         'auction_package_multiplier'           => 1,
@@ -258,6 +263,18 @@ $config = (object)[
         // any of their farm lists is raided automatically, every N minutes (N is
         // the player's choice), for the rest of the round. Price: gold->autoRaidGold.
         'autoRaidPremiumEnabled'                  => false,
+        // --- fake player (bot) behaviour, see Model\BotWarModel + Core\AI ---
+        // Bots raid: Natar farm villages always, plus villages of players whose
+        // total population is at least botAttackMinPopulation and who are out of
+        // protection. Defensive units always stay home.
+        'botWarEnabled'                           => false,
+        'botAttackMinPopulation'                  => 800,
+        // Bots spend the gold they accumulate on Plus and on production boosts.
+        'botSpendGoldEnabled'                     => false,
+        // Share of the AI steps that train troops instead of building (0-100).
+        // The stock code trained only when there was nothing left to build,
+        // which on a 1x world meant never: no bot ever had an army.
+        'botTrainChance'                          => 45,
         'startMedalsAtStartOfWeek'                => false,
         'realCancelAttack'                        => true,
         'makeAuctionsCheaperInSell'               => false,

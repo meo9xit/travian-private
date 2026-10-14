@@ -190,11 +190,11 @@ class Launcher
         $jobs = [];
         {
             $job = [$fakeModel, 'handleFakeUsers'];
-            $jobs[] = new Job('AIProgress:handleFakeUsers', 45, $job);
+            $jobs[] = new Job('AIProgress:handleFakeUsers', 90, $job);
         }
         {
             $job = [$fakeModel, 'handleFakeUserExpands'];
-            $jobs[] = new Job('AIProgress:handleFakeUserExpands', 45, $job);
+            $jobs[] = new Job('AIProgress:handleFakeUserExpands', 90, $job);
         }
         $natarsModel = new NatarsModel();
         {

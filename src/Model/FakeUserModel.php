@@ -16,6 +16,11 @@ class FakeUserModel
     {
         if (!$this->canRun()) return;
         $db = DB::getInstance();
+        // The war columns are read by the AI step below (Core\AI::isDefending),
+        // so make sure they exist before the first bot is processed - a missing
+        // column would raise a warning, and in CLI a warning is an exception.
+        $war = new BotWarModel();
+        $war->ensureSchema();
         $interval = mt_rand(3600, 10800);
         $stmt = $db->query("SELECT id FROM users WHERE access=3 AND lastHeroExpCheck <= " . (time() - $interval) . " LIMIT 10");
         while ($row = $stmt->fetch_assoc()) {
@@ -43,6 +48,14 @@ class FakeUserModel
             $count = ceil(($now - $row['lastVillageCheck']) / $interval);
             AI::doSomethingRandom($row['kid'], $count);
         }
+
+        // War and economy: these used to have no equivalent at all, so the bots
+        // never left their village and never spent a single coin of gold.
+        if ($war->isEnabled()) {
+            $war->defendThreatenedVillages();
+            $war->processRaids();
+        }
+        $war->spendGold();
     }
 
     private function canRun()
@@ -80,7 +93,10 @@ class FakeUserModel
                 continue;
             }
             $count = ceil((time() - $row['lastVillageExpand']) / $interval);
-            $find = $register->generateFakeUserVillage($count);
+            // Clustered expansion: the new village goes next to the bot's capital
+            // (and preferably next to oases), so the villages can support each
+            // other and feed the main one, instead of being scattered at random.
+            $find = $register->generateFakeUserVillageNear($row['id'], $count);
             if (!empty($find)) {
                 $villages = explode(",", $find);
                 $db->query("UPDATE available_villages SET occupied=1 WHERE kid IN($find)");

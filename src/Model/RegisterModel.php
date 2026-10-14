@@ -378,6 +378,80 @@ class RegisterModel
         return rtrim($result, ',');
     }
 
+    /**
+     * Free village slots for a fake player, clustered around its capital.
+     *
+     * generateFakeUserVillage() picks spots at random across the whole map, so
+     * bots ended up with villages scattered everywhere: no mutual support, no
+     * shared oases, and every new village had to be defended on its own. This
+     * variant keeps the new villages within $maxDistance fields of the bot's
+     * home village, so the cluster can reinforce itself and the oases around it
+     * feed the capital.
+     *
+     * @return string comma separated kid list ('' when nothing is free)
+     */
+    public function generateFakeUserVillageNear($uid, $count = 1, $maxDistance = 25)
+    {
+        $db = DB::getInstance();
+        $main = $db->fetchScalar("SELECT kid FROM users WHERE id=" . (int)$uid);
+        if (!$main) {
+            return $this->generateFakeUserVillage($count);
+        }
+        $xy = Formulas::kid2xy($main);
+        $totalCoordinate = 1 + (2 * MAP_SIZE);
+        $totalCoordinate2 = 1 + (3 * MAP_SIZE);
+        $dist = "SQRT(POW(((w.x-{$xy['x']}+{$totalCoordinate2})%{$totalCoordinate} -" . MAP_SIZE . "), 2) + POW(((w.y-{$xy['y']}+{$totalCoordinate2})%{$totalCoordinate} -" . MAP_SIZE . "), 2))";
+
+        // Take a wider ring of candidates and then prefer the ones with oases
+        // close by: an oasis is what actually raises a village's production.
+        $result = $db->query("SELECT a.kid, $dist AS dist
+                              FROM available_villages a
+                              JOIN wdata w ON w.id = a.kid
+                              WHERE a.occupied = 0 AND a.fieldtype > 0 AND $dist <= " . (int)$maxDistance . "
+                              ORDER BY $dist ASC
+                              LIMIT " . (max(1, (int)$count) * 8));
+        $candidates = [];
+        while ($row = $result->fetch_assoc()) {
+            $candidates[(int)$row['kid']] = (int)$row['dist'];
+        }
+        if (!sizeof($candidates)) {
+            // Nothing free in the cluster: fall back to a random free slot so the
+            // bot keeps growing instead of standing still.
+            return $this->generateFakeUserVillage($count);
+        }
+        $oasisCounts = [];
+        foreach (array_keys($candidates) as $kid) {
+            $oasisCounts[$kid] = $this->countNearbyFreeOases($kid, 3);
+        }
+        // Sort explicitly: most oases first, then nearest to the capital.
+        $kids = array_keys($candidates);
+        usort($kids, function ($a, $b) use ($candidates, $oasisCounts) {
+            if ($oasisCounts[$a] != $oasisCounts[$b]) {
+                return $oasisCounts[$b] - $oasisCounts[$a];
+            }
+            return $candidates[$a] - $candidates[$b];
+        });
+        $picked = array_slice($kids, 0, max(1, (int)$count));
+        return implode(",", $picked);
+    }
+
+    /**
+     * How many unowned oases are within $distance fields of a village - the
+     * resource bonus a new village would bring to the cluster.
+     */
+    private function countNearbyFreeOases($kid, $distance = 3)
+    {
+        $db = DB::getInstance();
+        $xy = Formulas::kid2xy($kid);
+        $totalCoordinate = 1 + (2 * MAP_SIZE);
+        $totalCoordinate2 = 1 + (3 * MAP_SIZE);
+        $dist = "SQRT(POW(((w.x-{$xy['x']}+{$totalCoordinate2})%{$totalCoordinate} -" . MAP_SIZE . "), 2) + POW(((w.y-{$xy['y']}+{$totalCoordinate2})%{$totalCoordinate} -" . MAP_SIZE . "), 2))";
+        return (int)$db->fetchScalar("SELECT COUNT(*)
+                                      FROM odata o
+                                      JOIN wdata w ON w.id = o.kid
+                                      WHERE o.owner = 0 AND $dist <= " . (int)$distance);
+    }
+
     public function createNewVillage($uid, $race, $kid, $expandedFrom = 0)
     {
         $village_name = T("Global", "newVillageName");

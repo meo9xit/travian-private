@@ -10,6 +10,45 @@ use function in_array;
 
 class AutoUpgradeAI
 {
+    /**
+     * Order in which a fake player fills its empty building slots.
+     *
+     * This used to be a shuffled list, which is why bots ended up with crannies
+     * and no barracks: a bot without a rally point (16) can never send a raid and
+     * a bot without a barracks (19) can never train the troops for one. The order
+     * below builds the war machine first, then the economy, then the extras - a
+     * new village gets a rally point and a barracks within its first day.
+     */
+    const BUILDING_PRIORITY = [
+        16, // rally point  - nothing can leave the village without it
+        19, // barracks     - trains the army
+        10, // warehouse    - resources are lost at the cap
+        11, // granary
+        23, // cranny       - the only defence a small village has
+        40, // wall         - handled by the caller as the wall slot
+        22, // academy      - unlocks better troops (research)
+        13, // smithy       - upgrades troops
+        15, // main building - faster building
+        20, // stable
+        21, // workshop
+        17, // marketplace
+        18, // embassy
+        34, // trapper (Teuton)
+        35, // brewery
+        36, // great warehouse
+        37, // great granary
+        24, // town hall
+        25, // residence
+        26, // palace
+        27, // trade office
+        28, // great barracks
+        29, // great stable
+        30, // tournament square
+        44, // horse drinking trough
+        45, // great workshop
+        14, // tournament square (alt id)
+    ];
+
     private $buildings = [], $resources = [], $buildingsStatic = [];
     private $capital = false, $hasPlus = false, $isWW = false, $skipWorkers = false;
     private $kid, $race = 5;
@@ -117,16 +156,13 @@ class AutoUpgradeAI
             }
             return false;
         }
-        $rand_arr = [
-            5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, /*more crannies*/
-            23, 23, 23, 23, 23, 23,/*more crannies*/
-            24, 25, /*26, */27, 28,/*29, 30,*/
-            34, 35, 36, 37, /*38, 39,*/ 44, 45
-        ];
+        $rand_arr = self::BUILDING_PRIORITY;
         if ($gid) {
             $rand_arr = [$gid];
         }
-        shuffle($rand_arr);
+        // No shuffle: the list above is the plan. Every candidate is still
+        // checked against resources, prerequisites and the build limits, so this
+        // only decides *what to try first*, never bypasses a rule.
         foreach ($rand_arr as $gid) {
             if ($gid == 16 && $rand_field != 39) {
                 continue;
@@ -329,12 +365,68 @@ class AutoUpgradeAI
         return $cu;
     }
 
+    /**
+     * Resource fields are worth pushing to round numbers: a level 10 field is
+     * twice the production of a level 5 one, and a bot with a real economy is
+     * the one that can pay for an army. Below the first milestone the bots focus
+     * on fields, above it they share time with the buildings.
+     */
+    const FIELD_MILESTONES = [5, 8, 10, 12, 15, 18, 20];
+
+    /**
+     * The next field that should be raised: the lowest level among the resource
+     * fields, so all 18 climb together and none is left behind.
+     *
+     * @return int field index 1..18, or 0 when everything is at the milestone
+     */
+    private function pickResourceField()
+    {
+        $milestone = 0;
+        foreach (self::FIELD_MILESTONES as $step) {
+            $milestone = $step;
+            $done = true;
+            for ($field = 1; $field <= 18; ++$field) {
+                if (($this->buildings[$field]['level'] + $this->getUpgradeState($field)) < $step) {
+                    $done = false;
+                    break;
+                }
+            }
+            if (!$done) {
+                break;
+            }
+        }
+        $best = 0;
+        $bestLevel = PHP_INT_MAX;
+        for ($field = 1; $field <= 18; ++$field) {
+            $level = $this->buildings[$field]['level'] + $this->getUpgradeState($field);
+            if ($level >= $milestone) {
+                continue;
+            }
+            if ($level < $bestLevel) {
+                $bestLevel = $level;
+                $best = $field;
+            }
+        }
+        return $best;
+    }
+
     public function upgrade()
     {
-        if ((time()-$this->creationTime) < 5400) {
-            $rand_field = mt_rand(1, 18);
+        // Alternate between the economy and the buildings instead of picking a
+        // random slot: fields first while they are behind, then the war
+        // buildings. (Kept as a choice between two candidates - which one is
+        // actually upgradable is decided by upgradeIndex() below.)
+        $field = $this->pickResourceField();
+        $earlyGame = (time() - $this->creationTime) < 5400;
+        if ($field > 0 && ($earlyGame || mt_rand(1, 100) <= 70)) {
+            $rand_field = $field;
         } else {
-            $rand_field = mt_rand(1, 5) <= 3 ? mt_rand(1, 18) : mt_rand(19, 40);
+            // Buildings, in the order of BUILDING_PRIORITY: find the empty slot
+            // that comes first in the plan, otherwise upgrade the lowest one.
+            $rand_field = $this->pickBuildingField();
+        }
+        if ($rand_field <= 0) {
+            $rand_field = $field > 0 ? $field : mt_rand(1, 18);
         }
         if ($this->isWW && in_array($rand_field, [21, 26, 30, 31, 32])) return false;
         if ($this->buildings[$rand_field]['item_id'] <= 0) {
@@ -359,5 +451,59 @@ class AutoUpgradeAI
             }
         }
         return false;
+    }
+
+    /**
+     * An empty building slot, chosen by BUILDING_PRIORITY: the slot number does
+     * not matter (any free slot can host any building), so the first plan entry
+     * that is not built yet wins. Falls back to the lowest built building.
+     *
+     * @return int field index 19..40
+     */
+    private function pickBuildingField()
+    {
+        $built = [];
+        for ($field = 19; $field <= 40; ++$field) {
+            if (($this->buildings[$field]['item_id'] ?? 0) > 0) {
+                $built[$this->buildings[$field]['item_id']] = true;
+            }
+        }
+        $empty = [];
+        for ($field = 19; $field <= 40; ++$field) {
+            if (($this->buildings[$field]['item_id'] ?? 0) <= 0) {
+                $empty[] = $field;
+            }
+        }
+        if (sizeof($empty)) {
+            foreach (self::BUILDING_PRIORITY as $gid) {
+                if (isset($built[$gid])) {
+                    continue;
+                }
+                // The rally point lives in a fixed slot (39) in this codebase.
+                $slot = $gid == 16 ? 39 : $empty[0];
+                if ($gid == 16 && (($this->buildings[39]['item_id'] ?? 0) > 0)) {
+                    continue;
+                }
+                if ($gid == 40 && (($this->buildings[40]['item_id'] ?? 0) > 0)) {
+                    continue;
+                }
+                return $slot;
+            }
+            return $empty[0];
+        }
+        // Nothing free: raise the lowest built building.
+        $best = 0;
+        $bestLevel = PHP_INT_MAX;
+        for ($field = 19; $field <= 40; ++$field) {
+            if (($this->buildings[$field]['item_id'] ?? 0) <= 0) {
+                continue;
+            }
+            $level = $this->buildings[$field]['level'];
+            if ($level < $bestLevel) {
+                $bestLevel = $level;
+                $best = $field;
+            }
+        }
+        return $best;
     }
 }

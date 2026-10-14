@@ -5,6 +5,7 @@ namespace Core;
 use function array_map;
 use function array_merge;
 use Controller\Build\TroopBuilding;
+use Core\Config;
 use Core\Database\DB;
 use Game\Buildings\AutoUpgradeAI;
 use Game\Formulas;
@@ -12,6 +13,7 @@ use Game\Hero\HeroHelper;
 use function getGameSpeed;
 use function method_exists;
 use Model\ArtefactsModel;
+use Model\BattleModel;
 use Model\TrainingModel;
 use Model\VillageModel;
 use function nrToUnitId;
@@ -21,7 +23,9 @@ use function unitIdToNr;
 class AI_MAIN
 {
     const RESOURCES_RATE = 2 / 3;
-    const SKIP_RESEARCH = TRUE;
+    // Bots used to skip research entirely, which capped every one of them at the
+    // first tier of troops - a bot army that cannot be upgraded is not a threat.
+    const SKIP_RESEARCH = FALSE;
     const SKIP_WORKERS = TRUE;
 
     private $village             = [];
@@ -167,8 +171,27 @@ class AI_MAIN
             ];
         }
         if (!sizeof($arr)) return false;
-        shuffle($arr);
-        $selected = $arr[mt_rand(0, sizeof($arr) - 1)];
+        // Instead of picking at random, choose the unit that fits the role the
+        // bot is playing right now: guards while it is being attacked, otherwise
+        // the strongest attacker it can field. Ties go to the higher tier (later
+        // slot), which is the better unit once it is researched.
+        $defending = $this->isDefending();
+        $best = null;
+        $bestScore = -1;
+        foreach ($arr as $candidate) {
+            $stats = BattleModel::unitCombatStats($race, $candidate['nr']);
+            $score = $defending
+                ? max($stats['def_i'], $stats['def_c'])
+                : $stats['off'];
+            if ($score > $bestScore || ($score === $bestScore && $best !== null && $candidate['nr'] > $best['nr'])) {
+                $bestScore = $score;
+                $best = $candidate;
+            }
+        }
+        if ($best === null || $bestScore <= 0) {
+            return false;
+        }
+        $selected = $best;
         if ($selected['isBarracks']) {
             $building = $barracks[0];
         } else if ($selected['isStable']) {
@@ -195,6 +218,31 @@ class AI_MAIN
             'building'      => $building,
             'training_time' => $training_time
         ];
+    }
+
+    /**
+     * True while this bot has been marked as under attack
+     * (BotWarModel::defendThreatenedVillages()). Cached per request: the AI step
+     * runs in a loop and would otherwise repeat this query for every action.
+     */
+    private static $defendingCache = [];
+
+    private function isDefending()
+    {
+        if (!isset($this->village['owner'])) {
+            return false;
+        }
+        $uid = (int)$this->village['owner'];
+        if (!array_key_exists($uid, self::$defendingCache)) {
+            $db = DB::getInstance();
+            // The column only exists once the bot war feature has run its
+            // migration; until then every bot simply is not defending.
+            $hasColumn = $db->fetchScalar("SHOW COLUMNS FROM users LIKE 'botDefendUntil'");
+            self::$defendingCache[$uid] = $hasColumn
+                ? ((int)$db->fetchScalar("SELECT botDefendUntil FROM users WHERE id=$uid") > time())
+                : false;
+        }
+        return self::$defendingCache[$uid];
     }
 
     private function isResourcesAvailable($costs)
@@ -243,23 +291,36 @@ class AI_MAIN
     public function researchUnit($kid)
     {
         if (!$this->training_buildings['academyLevel']) return false;
+        // One research at a time per village: without this guard every AI step
+        // queued another row for a unit that was already being researched (the
+        // tdata flag only flips when it completes), burning resources on
+        // duplicates.
+        $db = DB::getInstance();
+        if ($db->fetchScalar("SELECT COUNT(*) FROM research WHERE kid=$kid") > 0) {
+            return false;
+        }
         $arr = [];
         for ($i = 2; $i <= 8; ++$i) {
             if ($this->researches['u' . $i]) continue;
             $unitId = nrToUnitId($i, $this->user['race']);
             $neededResources = Formulas::uResearchCost($unitId);
             if (!$this->isResourcesAvailable($neededResources)) continue;
-            if (!$this->_canDoResearch(Formulas::uResearchPreRequests(Session::getInstance()->getRace(),
+            // The bot's own tribe - this used to read the session race, which is
+            // empty in the automation engine.
+            if (!$this->_canDoResearch(Formulas::uResearchPreRequests($this->user['race'],
                 $unitId))) continue;
             $arr[] = ['nr' => $i, 'costs' => $neededResources, 'duration' => Formulas::uResearchTime($unitId)];
         }
         if (!sizeof($arr)) {
             return false;
         }
-        shuffle($arr);
-        $selected = $arr[mt_rand(0, sizeof($arr) - 1)];
+        // Research in slot order: the tribe's units get better as the slot goes
+        // up, so this walks the tree instead of picking a random branch.
+        usort($arr, function ($a, $b) {
+            return $a['nr'] <=> $b['nr'];
+        });
+        $selected = $arr[0];
         $this->takeResources($selected['costs']);
-        $db = DB::getInstance();
         $db->query("INSERT INTO research (`kid`, `mode`, `nr`, `end_time`) VALUES ($kid, 1, " . $selected['nr'] . ", " . (time() + $selected['duration']) . ")");
         return true;
     }
@@ -355,22 +416,34 @@ class AI_MAIN
 
 class AI
 {
+    /**
+     * One "thinking" step for a fake player: research, build, train.
+     *
+     * The previous version trained units only when there was nothing left to
+     * build, and on a slow world (speed <= 10, which includes 1x) it spent the
+     * first 36 hours building only. The result measured on a live 1x world was
+     * 147 bots, 7 barracks and zero troops ever trained - so no bot could ever
+     * attack anything. Training now happens on a configurable share of the
+     * steps (custom->botTrainChance, default 45%) and research runs first,
+     * because better troops are what makes an army dangerous.
+     */
     public static function doSomethingRandom($kid, $count = 1)
     {
-        $seconds_past = getGameElapsedSeconds();
         $ai = new AI_MAIN($kid);
+        $trainChance = (int)Config::getProperty("custom", "botTrainChance");
+        if ($trainChance <= 0 || $trainChance > 100) {
+            $trainChance = 45;
+        }
         for ($i = 1; $i <= $count; ++$i) {
-            if (getGameSpeed() <= 10 && $seconds_past <= 1.5 * 86400) {
-                $rnd = mt_rand(1, 5);
-                if ($rnd <= 3) {
+            if ($ai->researchUnit($kid)) {
+                continue;
+            }
+            if (mt_rand(1, 100) <= $trainChance) {
+                if (!$ai->trainUnits()) {
                     $ai->upgradeBuilding();
-                } else {
-                    if (!$ai->upgradeBuilding()) {
-                        $ai->upgradeBuilding();
-                    }
                 }
             } else {
-                if ($ai->upgradeBuilding()) {
+                if (!$ai->upgradeBuilding()) {
                     $ai->trainUnits();
                 }
             }

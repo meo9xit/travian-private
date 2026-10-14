@@ -76,6 +76,28 @@ class BattleModel
         6 => [20, 25],
         7 => [20, 25],
     ];
+    /**
+     * Unit combat values for one tribe/unit slot, so offline code (the bot AI)
+     * can estimate a fight without duplicating the tables above.
+     *
+     * The tables are instance properties and the constructor needs a movement
+     * row, so an instance is created without running it.
+     *
+     * @return array{off:int, def_i:int, def_c:int}
+     */
+    public static function unitCombatStats($race, $nr)
+    {
+        static $self = null;
+        if ($self === null) {
+            $self = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        }
+        return [
+            'off'   => isset($self->off[$race][$nr]) ? (int)$self->off[$race][$nr] : 0,
+            'def_i' => isset($self->def_i[$race][$nr]) ? (int)$self->def_i[$race][$nr] : 0,
+            'def_c' => isset($self->def_c[$race][$nr]) ? (int)$self->def_c[$race][$nr] : 0,
+        ];
+    }
+
     protected $upkeep = [
         1 => [1 => 1, 1, 1, 2, 3, 4, 3, 6, 5, 1, 6],
         2 => [1 => 1, 1, 1, 1, 2, 3, 3, 6, 4, 1, 6],
