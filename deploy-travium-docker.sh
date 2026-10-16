@@ -1023,8 +1023,13 @@ $config->extraSettings->generalOptions->oneHourOfProduction->enabled = true;
 $config->extraSettings->generalOptions->smithyUpgradeAllToMax->enabled = true;
 $config->extraSettings->generalOptions->academyResearchAll->enabled = true;
 $config->extraSettings->generalOptions->rallyPointTo20->enabled = true;
-$config->extraSettings->generalOptions->upgradeAllResourcesTo20->enabled = true;
-$config->extraSettings->generalOptions->upgradeAllResourcesTo30->enabled = true;
+// "Upgrade Resources Fields to level N" are buyBuildings packages, not
+// generalOptions entries: the payment wizard renders the packages and
+// premiumFeature::buyBuildings() executes them. Enabling the generalOptions
+// keys above did nothing (their handlers are commented out in
+// Controller/Ajax/premiumFeature.php), so the level-30 button stayed dead.
+$config->extraSettings->buyBuildings['packages']['upgradeAllResourcesTo20']->enabled = true;
+$config->extraSettings->buyBuildings['packages']['upgradeAllResourcesTo30']->enabled = true;
 $config->extraSettings->power->atkBonus->enabled = true;  // +attack power
 $config->extraSettings->power->atkBonus->duration = 3;    // hours
 $config->extraSettings->power->defBonus->enabled = true;  // +defence power

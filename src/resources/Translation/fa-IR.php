@@ -4862,4 +4862,8 @@ $Definition['TransferGold'] = [
     'SenderEmailAddress' => 'ایمیل ارسال اکانت مبدا',
     'InvalidAccountEmail' => 'ایمیل وارد شده برای اکانت صحیح نیست.',
 ];
+$Definition['PaymentWizard']['upgradeResourcesCapitalOnly'] = 'فقط در دهکده‌ی مرکزی می‌توان سطح منابع را بالاتر از 20 ارتقا داد.';
+$Definition['PaymentWizard']['upgradeResourcesAlreadyAtLevel'] = 'تمامی منابع در این سطح هستند.';
+$Definition['PaymentWizard']['This feature is disabled.'] = 'این قابلیت غیرفعال است.';
+$Definition['PaymentWizard']['Not enough gold.'] = 'طلا کافی نیست.';
 return $Definition;

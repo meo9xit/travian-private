@@ -503,6 +503,8 @@ class premiumFeature extends AjaxBase
         $bid = $realPackage->bid;
 
         if (!$realPackage->enabled) {
+            $this->response['error'] = TRUE;
+            $this->response['errorMsg'] = T("PaymentWizard", 'This feature is disabled.');
             return;
         }
 
@@ -513,7 +515,14 @@ class premiumFeature extends AjaxBase
             //$this->response['redirectTo'] = 'dorf1.php';
 
             $resourceLevel = preg_replace('/[^0-9]/', '', $bid);
-            if ($resourceLevel>=25 && !$village->isCapital()) return;
+            // Resource fields above level 20 only exist in the capital, so buying
+            // this package in another village cannot work. Say so instead of
+            // returning silently (which looked like "the button does nothing").
+            if ($resourceLevel>=25 && !$village->isCapital()) {
+                $this->response['error'] = TRUE;
+                $this->response['errorMsg'] = T("PaymentWizard", 'upgradeResourcesCapitalOnly');
+                return;
+            }
             $done = true;
             $max = $resourceLevel;
             for ($i = 1; $i <= 18; ++$i) {
@@ -524,6 +533,8 @@ class premiumFeature extends AjaxBase
                 }
             }
             if ($done) {
+                $this->response['error'] = TRUE;
+                $this->response['errorMsg'] = T("PaymentWizard", 'upgradeResourcesAlreadyAtLevel');
                 return;
             }
             
@@ -535,6 +546,12 @@ class premiumFeature extends AjaxBase
                         (new BuildingAction())->upgrade($village->getKid(), $i, $up, true);
                     }
                 }
+            } else {
+                // The gold could not be taken - never report a purchase that did
+                // not happen.
+                $this->response['error'] = TRUE;
+                $this->response['errorMsg'] = T("PaymentWizard", 'Not enough gold.');
+                return;
             }
         }else{           
             $db = DB::getInstance();

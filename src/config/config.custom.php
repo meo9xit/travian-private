@@ -130,9 +130,9 @@ $config->bonus->bonusGoldTopAllianceCount = 5;
     if ($config->game->speed > 300) {
 		$config->extraSettings->buyBuildings['packages']['upgradeAllResourcesTo20']->enabled = true;
     }
-    if ($config->game->speed > 500) {
+    // Level 30 is a normal option in the payment wizard, so it has to be enabled
+    // at every speed (Core\Config ships this package as disabled).
 		$config->extraSettings->buyBuildings['packages']['upgradeAllResourcesTo30']->enabled = true;
-    }
 
     $config->extraSettings->buyResources['enabled'] = true;
     $config->extraSettings->buyAnimal['enabled'] = true;

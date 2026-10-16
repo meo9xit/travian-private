@@ -3513,6 +3513,10 @@ $Definition['PaymentWizard']['upgradeAllResourcesTo20'] = 'Upgrade Resources Fie
 $Definition['PaymentWizard']['upgradeAllResourcesTo20Desc'] = '';
 $Definition['PaymentWizard']['upgradeAllResourcesTo30'] = 'Upgrade Resources Fields to level 30';
 $Definition['PaymentWizard']['upgradeAllResourcesTo30Desc'] = '';
+$Definition['PaymentWizard']['upgradeResourcesCapitalOnly'] = 'Resource fields can only be upgraded above level 20 in your capital village.';
+$Definition['PaymentWizard']['upgradeResourcesAlreadyAtLevel'] = 'All resource fields already have that level.';
+$Definition['PaymentWizard']['This feature is disabled.'] = 'This feature is disabled.';
+$Definition['PaymentWizard']['Not enough gold.'] = 'Not enough gold.';
 
 //
 $Definition['productionOverview'] = [

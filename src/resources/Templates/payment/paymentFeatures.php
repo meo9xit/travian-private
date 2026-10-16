@@ -91,13 +91,18 @@
                 
                 $HTML .= '<div class="premiumFeatureBuilding" style="width:auto;height:100%"><img src="img/x.gif" class="building g'.$bid.'" alt=""></div>';
             }else{
-                $disabled = true;
                 $resourceLevel = preg_replace('/[^0-9]/', '', $bid);
-                for ($i = 1; $i <= 18; ++$i) {
-                    if ($village->getField($i)['level'] >= $resourceLevel){
-                        $disabled &=true;
-                    }else{
-                        $disabled &=false;
+                // Levels 25+ are capital-only (premiumFeature::buyBuildings() refuses
+                // them anywhere else), so do not offer a button that cannot work.
+                if ($resourceLevel >= 25 && !$village->isCapital()) {
+                    $disabled = true;
+                } else {
+                    $disabled = true;
+                    for ($i = 1; $i <= 18; ++$i) {
+                        if ($village->getField($i)['level'] < $resourceLevel) {
+                            $disabled = false;
+                            break;
+                        }
                     }
                 }
             }
@@ -496,6 +501,9 @@
                 <div class="paymentWizardMenu <?=$order['buyBuildings'] == 1 ? '' : 'hide'; ?>" id="buyBuildings">
                     <?php 
                     foreach ($config->extraSettings->buyBuildings['packages'] as $name => $package) {
+                        // A disabled package must not be offered: premiumFeature::buyBuildings()
+                        // refuses to run it, so the button used to do nothing at all.
+                        if (empty($package->enabled)) continue;
                         echo buildBuildings('buyBuildings'.$name, $package->name, (isset($package->coinsCapital) && Village::getInstance()->isCapital())? $package->coinsCapital : $package->coins, false, 0, $package->bid);
                     }
                     ?>

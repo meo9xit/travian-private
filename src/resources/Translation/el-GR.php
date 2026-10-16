@@ -5047,4 +5047,8 @@ $Definition['WWChangeName'] = [
     'What do you want Wonder of the world name to be?' => 'What do you want Wonder of the world name to be?',
     'Can be changed until level 11' => 'Can be changed until level 11',
 ];
+$Definition['PaymentWizard']['upgradeResourcesCapitalOnly'] = 'Resource fields can only be upgraded above level 20 in your capital village.';
+$Definition['PaymentWizard']['upgradeResourcesAlreadyAtLevel'] = 'All resource fields already have that level.';
+$Definition['PaymentWizard']['This feature is disabled.'] = 'This feature is disabled.';
+$Definition['PaymentWizard']['Not enough gold.'] = 'Not enough gold.';
 return $Definition;

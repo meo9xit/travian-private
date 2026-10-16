@@ -4888,4 +4888,8 @@ $Definition['WWChangeName'] = [
     'What do you want Wonder of the world name to be?' => 'What do you want Wonder of the world name to be?',
     'Can be changed until level 11' => 'Can be changed until level 11',
 ];
+$Definition['PaymentWizard']['upgradeResourcesCapitalOnly'] = 'يمكن ترقية حقول الموارد فوق المستوى 20 في القرية العاصمة فقط.';
+$Definition['PaymentWizard']['upgradeResourcesAlreadyAtLevel'] = 'جميع حقول الموارد بهذا المستوى بالفعل.';
+$Definition['PaymentWizard']['This feature is disabled.'] = 'هذه الميزة معطلة.';
+$Definition['PaymentWizard']['Not enough gold.'] = 'لا يوجد ذهب كافٍ.';
 return $Definition;
