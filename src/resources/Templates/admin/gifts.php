@@ -150,7 +150,7 @@
                     </td>
                     <td>
                         <center>
-                            <input class="give_gold" name="giftUidGold" value="<?= $vars['giftUidGold']; ?>" maxlength="4"> &nbsp;
+                            <input class="give_gold" name="giftUidGold" value="<?= $vars['giftUidGold']; ?>"> &nbsp;
                             <img src="img/admin/gold.gif" class="gold" alt="Gold" name="gold" title="Gold"/>
                         </center>
                     </td>
