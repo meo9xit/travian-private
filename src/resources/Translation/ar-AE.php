@@ -4892,4 +4892,6 @@ $Definition['PaymentWizard']['upgradeResourcesCapitalOnly'] = 'يمكن ترقي
 $Definition['PaymentWizard']['upgradeResourcesAlreadyAtLevel'] = 'جميع حقول الموارد بهذا المستوى بالفعل.';
 $Definition['PaymentWizard']['This feature is disabled.'] = 'هذه الميزة معطلة.';
 $Definition['PaymentWizard']['Not enough gold.'] = 'لا يوجد ذهب كافٍ.';
+$Definition['PaymentWizard']['fillStorageDesc'] = 'يملأ الخشب والطين والحديد والمحصول حتى سعة المخزن.';
+$Definition['PaymentWizard']['storageAlreadyFull'] = 'مخزنك ممتلئ بالفعل.';
 return $Definition;

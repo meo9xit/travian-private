@@ -4866,4 +4866,6 @@ $Definition['PaymentWizard']['upgradeResourcesCapitalOnly'] = 'فقط در ده�
 $Definition['PaymentWizard']['upgradeResourcesAlreadyAtLevel'] = 'تمامی منابع در این سطح هستند.';
 $Definition['PaymentWizard']['This feature is disabled.'] = 'این قابلیت غیرفعال است.';
 $Definition['PaymentWizard']['Not enough gold.'] = 'طلا کافی نیست.';
+$Definition['PaymentWizard']['fillStorageDesc'] = 'چوب، خشت، آهن و گندم را تا ظرفیت انبار پر می‌کند.';
+$Definition['PaymentWizard']['storageAlreadyFull'] = 'انبار شما پر است.';
 return $Definition;

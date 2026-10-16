@@ -419,17 +419,50 @@ class premiumFeature extends AjaxBase
         $this->response['data'] = [];
         $this->response['data']['functionToCall'] = 'productPurchased';
         $db = DB::getInstance();
-        $db->query("UPDATE users SET lastBuyResources=" . time() . " WHERE id=" . Session::getInstance()->getPlayerId());
-        
+
         $resources = array(0,0,0,0);
-        $productionAvg = (Formulas::fieldProduction(20) * 4);
-        for($i=0; $i < 4;  $i++){      
-            $resources[$i] = 0;          
-            if(!$realPackage['is_single'] || ($realPackage['is_single'] && $realPackage['resource'] == $i+1)){
-                $resources[$i] = ($realPackage['hours']) *  $productionAvg;
+        $village = Village::getInstance();
+        if (!empty($realPackage['fill'])) {
+            // "Fill storage": credit whatever is missing up to the village's
+            // storage capacity instead of a fixed hours * production amount.
+            // Compare against the stored amounts as well, so a village whose
+            // in-memory copy is behind (e.g. a second purchase in one process)
+            // cannot be charged for resources it already has.
+            $current = $village->getCurrentResources();
+            $stored = $db->query("SELECT wood, clay, iron, crop, maxstore, maxcrop FROM vdata WHERE kid=" . $village->getKid())->fetch_assoc();
+            $maxStore = (float)$stored['maxstore'];
+            $maxCrop = (float)$stored['maxcrop'];
+            $storedResources = [
+                (float)$stored['wood'],
+                (float)$stored['clay'],
+                (float)$stored['iron'],
+                max((float)$stored['crop'], 0),
+            ];
+            for ($i = 0; $i < 4; $i++) {
+                $capacity = $i == 3 ? $maxCrop : $maxStore;
+                $have = max((float)$current[$i], $storedResources[$i]);
+                $resources[$i] = max(0, floor($capacity - $have));
+            }
+        } else {
+            $productionAvg = (Formulas::fieldProduction(20) * 4);
+            for($i=0; $i < 4;  $i++){      
+                $resources[$i] = 0;          
+                if(!$realPackage['is_single'] || ($realPackage['is_single'] && $realPackage['resource'] == $i+1)){
+                    $resources[$i] = ($realPackage['hours']) *  $productionAvg;
+                }
             }
         }
-        
+
+        // Nothing to hand out (full storage / misconfigured package): fail before
+        // charging gold or starting the buy cooldown.
+        if (!array_sum($resources)) {
+            $this->response['error'] = TRUE;
+            $this->response['errorMsg'] = T("PaymentWizard", 'storageAlreadyFull');
+            return;
+        }
+
+        $db->query("UPDATE users SET lastBuyResources=" . time() . " WHERE id=" . Session::getInstance()->getPlayerId());
+
         $db->begin_transaction();        
         $db->query($q = "UPDATE vdata SET wood=wood+{$resources[0]}, clay=clay+{$resources[1]}, iron=iron+{$resources[2]}, crop=crop+{$resources[3]} WHERE kid=" . Session::getInstance()->getSelectedVillageID());
         ResourcesHelper::updateVillageResources(Village::getInstance()->getKid(), TRUE);
@@ -438,6 +471,9 @@ class premiumFeature extends AjaxBase
             $db->commit();
         } else {
             $db->rollback();
+            $this->response['error'] = TRUE;
+            $this->response['errorMsg'] = T("PaymentWizard", 'Not enough gold.');
+            return;
         }
         $this->response['data']['options']['type'] = 'resources';
         $this->response['data']['options']['newGold'] = Session::getInstance()->getGold() - $coins;

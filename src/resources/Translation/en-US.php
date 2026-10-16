@@ -5299,4 +5299,6 @@ $Definition['TransferGold'] = [
 ];
 
 
+$Definition['PaymentWizard']['fillStorageDesc'] = 'Fills wood, clay, iron and crop up to your storage capacity.';
+$Definition['PaymentWizard']['storageAlreadyFull'] = 'Your storage is already full.';
 return $Definition;

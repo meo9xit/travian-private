@@ -455,6 +455,10 @@ $config = (object)[
                 ['id'=> 5, 'resource' => -1, 'hours' => 6, 'coins' => 200, 'delivery' => 0, 'is_single' => 0, 'name' => 'Small Combo Package'],
                 ['id'=> 6, 'resource' => -1, 'hours' => 12, 'coins' => 400, 'delivery' => 0, 'is_single' => 0, 'name' => 'Medium Combo Package'],
                 ['id'=> 7, 'resource' => -1, 'hours' => 24, 'coins' => 800, 'delivery' => 0, 'is_single' => 0, 'name' => 'Large Combo Package'],
+                // 'fill' => 1 tops every resource up to the village storage
+                // capacity instead of crediting hours * production (see
+                // Controller\Ajax\premiumFeature::buyResources()).
+                ['id'=> 8, 'resource' => -1, 'hours' => 0, 'coins' => 500, 'delivery' => 0, 'is_single' => 0, 'fill' => 1, 'name' => 'Fill Storage'],
             ],
         ],
         'buyTroops'                => [

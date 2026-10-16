@@ -5051,4 +5051,6 @@ $Definition['PaymentWizard']['upgradeResourcesCapitalOnly'] = 'Resource fields c
 $Definition['PaymentWizard']['upgradeResourcesAlreadyAtLevel'] = 'All resource fields already have that level.';
 $Definition['PaymentWizard']['This feature is disabled.'] = 'This feature is disabled.';
 $Definition['PaymentWizard']['Not enough gold.'] = 'Not enough gold.';
+$Definition['PaymentWizard']['fillStorageDesc'] = 'Fills wood, clay, iron and crop up to your storage capacity.';
+$Definition['PaymentWizard']['storageAlreadyFull'] = 'Your storage is already full.';
 return $Definition;

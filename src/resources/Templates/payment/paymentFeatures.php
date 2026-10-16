@@ -200,6 +200,24 @@
                 $coins = $package['coins'];
                 $delivery = $package['delivery'];
 
+                // "Fill storage" has no fixed amount: show what would really be
+                // credited right now (capacity - current) and block the buy when
+                // the storage is already full.
+                $isFill = !empty($package['fill']);
+                $disabled = false;
+                $fillAmounts = [];
+                if ($isFill) {
+                    $fillVillage = Village::getInstance();
+                    $fillCurrent = $fillVillage->getCurrentResources();
+                    $fillMaxStore = (float)$fillVillage->get('maxstore');
+                    $fillMaxCrop = (float)$fillVillage->get('maxcrop');
+                    for ($i = 0; $i < 4; $i++) {
+                        $capacity = $i == 3 ? $fillMaxCrop : $fillMaxStore;
+                        $fillAmounts[$i] = max(0, floor($capacity - $fillCurrent[$i]));
+                    }
+                    $disabled = array_sum($fillAmounts) == 0;
+                }
+
                 $HTML .= '<div class="featureData combo">';
                     $HTML .= '<div class="featureTitle">';
                         $HTML .=  $package['name'];
@@ -212,12 +230,15 @@
                         //foreach($resources as $i => $resource){
                         for($i = 0; $i < 4; $i++){                            
                             $resourceId = $i;
-                            $resourceAmt =  ($package['hours']) * $productionAvg;
+                            $resourceAmt = $isFill ? $fillAmounts[$i] : (($package['hours']) * $productionAvg);
                             $HTML .= '<div class="inlineIcon resources"><i class="r'.($i + 1).'"></i>&nbsp;<span class="value ">' . number_format_x($resourceAmt) . '</span></div>';
                         }
                     $HTML .= '</div>';     
                     $HTML .= '<div class="featureBuyButton">';     
-                        $HTML .= '<div class="">' . (new GoldHelper())->renderBuyButton($featureName, $coins, $wwInAvailable) . '</div>';
+                        $HTML .= '<div class="">' . (new GoldHelper())->renderBuyButton($featureName, $coins, $wwInAvailable, $disabled) . '</div>';
+                        if ($isFill) {
+                            $HTML .= '<div class="featureButtonSubtitle subtitle">' . T("PaymentWizard", "fillStorageDesc") . '</div>';
+                        }
                         $HTML .= '<div class="featureButtonSubtitle subtitle">' . T("PaymentWizard", "delivery") . ': <span class="bold">' . ($delivery == 0 ? T("PaymentWizard", "Immediately") : $delivery) . '</span>  ' . ($delivery == 0 ? '' : T("PaymentWizard", "Minutes")) . '</div>';
                     $HTML .= '</div>';   
                 $HTML .= '</div>';   
