@@ -52,6 +52,36 @@ class BotWarModel
     /** A scout report stays valid for this long before the bot spies again. */
     const SCOUT_VALIDITY = 6 * 3600;
 
+    /** Bot villages considered for oasis farming per automation tick. */
+    const OASIS_VILLAGES_PER_RUN = 20;
+
+    /** Oasis raids sent per automation tick, across all bots. */
+    const OASIS_RAIDS_PER_RUN = 10;
+
+    /** Seconds before the same bot is considered for farming again. */
+    const OASIS_ROTATION = 900;
+
+    /** Seconds before the same bot farms the same oasis again. */
+    const OASIS_COOLDOWN = 1800;
+
+    /** Units in a "collect" run once the oasis has no defenders left. */
+    const OASIS_COLLECT_UNITS = 10;
+
+    /** How far (map tiles) a bot looks for a free oasis. */
+    const OASIS_MAX_DISTANCE = 12;
+
+    /** Oases inspected per farming attempt, so a too-strong one can be skipped. */
+    const OASIS_CANDIDATES = 6;
+
+    /** Only clear a guarded oasis when our offence is this many times its guards. */
+    const OASIS_CLEAR_RATIO = 2.0;
+
+    /** Share of the farming runs that go for a guarded oasis (the rest collect). */
+    const OASIS_CLEAR_CHANCE = 35;
+
+    /** Above this share of the store the loot would be capped away: not worth it. */
+    const STORE_FULL_RATIO = 0.95;
+
     private static $schemaChecked = false;
 
     public function isEnabled()
@@ -98,6 +128,12 @@ class BotWarModel
         if (!$db->fetchScalar("SHOW COLUMNS FROM users LIKE 'botDefendUntil'")) {
             $db->query("ALTER TABLE users ADD COLUMN `botDefendUntil` INT(11) NOT NULL DEFAULT '0'");
         }
+        // When this bot was last *considered* for oasis farming - stamped even
+        // when nothing could be sent, so a bot with no army cannot park itself at
+        // the front of the queue and starve the others.
+        if (!$db->fetchScalar("SHOW COLUMNS FROM users LIKE 'botLastFarm'")) {
+            $db->query("ALTER TABLE users ADD COLUMN `botLastFarm` INT(11) NOT NULL DEFAULT '0'");
+        }
         // Which villages this bot has already scouted (and when), so it spies on a
         // player once and then attacks instead of spying forever.
         $db->query("CREATE TABLE IF NOT EXISTS bot_scout (
@@ -105,6 +141,15 @@ class BotWarModel
                         to_kid INT(6) NOT NULL,
                         scout_time INT(11) NOT NULL DEFAULT '0',
                         PRIMARY KEY (uid, to_kid)
+                    ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4");
+        // Which oasis this bot farms and when. An oasis only holds a few thousand
+        // resources, so without this the bot would strip the same one every tick
+        // and get nothing after the first hit.
+        $db->query("CREATE TABLE IF NOT EXISTS bot_oasis (
+                        uid INT(11) NOT NULL,
+                        kid INT(6) NOT NULL,
+                        last_raid INT(11) NOT NULL DEFAULT '0',
+                        PRIMARY KEY (uid, kid)
                     ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4");
     }
 
@@ -527,6 +572,274 @@ class BotWarModel
         return (bool)$result;
     }
 
+    // ---------------------------------------------------------------- oases ----
+
+    /**
+     * Oasis farming: the income a bot has besides its own fields.
+     *
+     * An unoccupied oasis stores a few thousand resources and regenerates on its
+     * own, which is exactly what a bot needs once it has spent its production on
+     * troops and stops growing. Two phases per oasis:
+     *
+     *  - the oasis still has guards (the game spawns up to 15, see
+     *    OasesModel::oasesTrainV3): one big wave, because a small run would be
+     *    wiped out and the oasis would stay closed. The wave is only sent when
+     *    the army is clearly stronger than the guards (botOasisClearRatio), so a
+     *    bot does not throw its troops away on an oasis it cannot take;
+     *  - the guards are gone: small recurring runs (botOasisCollectUnits, 10 by
+     *    default) that carry the resources home.
+     *
+     * Every bot gets its turn: the rotation is by users.botLastFarm, and that
+     * stamp is written whether or not a raid went out, so a bot with no army
+     * cannot block the queue for the others.
+     *
+     * Only oases nobody owns are used (owner = 0 AND did = 0), so this never
+     * steals from a player who has captured one.
+     *
+     * @return int number of oasis raids sent
+     */
+    public function processOasisFarming()
+    {
+        if (!getCustom('botOasisFarmEnabled')) {
+            return 0;
+        }
+        $this->ensureSchema();
+        $db = DB::getInstance();
+        $now = time();
+        $sent = 0;
+        $seen = [];
+        $rotation = $this->oasisRotation();
+        // Fair rotation over the bots, oldest attempt first. The stamp below is
+        // written even when nothing could be sent, so a bot without an army (or
+        // without a free oasis in range) cannot sit at the front of the queue
+        // forever and eat the whole per-run budget - that is how half the world's
+        // bots ended up with no income at all.
+        $result = $db->query("SELECT v.kid, v.owner, u.race
+                              FROM vdata v
+                              JOIN users u ON u.id = v.owner
+                              WHERE u.access = 3
+                                AND u.protection < $now
+                                AND u.vacationActiveTil < $now
+                                AND u.botLastFarm + $rotation <= $now
+                                AND (SELECT fd.f39 FROM fdata fd WHERE fd.kid = v.kid) > 0
+                                AND EXISTS (SELECT 1 FROM units un WHERE un.kid = v.kid
+                                            AND (un.u1+un.u2+un.u3+un.u4+un.u5+un.u6+un.u7+un.u8+un.u9+un.u10) > 0)
+                              ORDER BY u.botLastFarm ASC, v.kid ASC
+                              LIMIT " . self::OASIS_VILLAGES_PER_RUN);
+        while ($row = $result->fetch_assoc()) {
+            if ($sent >= self::OASIS_RAIDS_PER_RUN) {
+                break;
+            }
+            $uid = (int)$row['owner'];
+            // One attempt per bot per round, even when it owns several villages.
+            if (isset($seen[$uid])) {
+                continue;
+            }
+            $seen[$uid] = true;
+            // Stamp first, so one bot cannot take the whole budget on every tick.
+            $db->query("UPDATE users SET botLastFarm=$now WHERE id=$uid");
+            $sent += $this->farmOasisFromVillage((int)$row['kid'], $uid, (int)$row['race']);
+        }
+        if ($sent > 0) {
+            Log::addLog(0, "botWar:oasis", sprintf("%d oasis raid(s) sent", $sent));
+        }
+        return $sent;
+    }
+
+    /**
+     * @return int 1 when a raid was sent from this village
+     */
+    private function farmOasisFromVillage($kid, $owner, $race)
+    {
+        $db = DB::getInstance();
+        $village = $db->query("SELECT wood, clay, iron, maxstore FROM vdata WHERE kid=$kid")->fetch_assoc();
+        if (!$village) {
+            return 0;
+        }
+        // A full store turns the run into a loss: the loot is capped away and the
+        // troops are gone from home for nothing.
+        if ($this->isStoreFull($village)) {
+            return 0;
+        }
+        $units = $db->query("SELECT * FROM units WHERE kid=$kid")->fetch_assoc();
+        if (!$units) {
+            return 0;
+        }
+        $offensive = [];
+        for ($nr = 1; $nr <= 10; ++$nr) {
+            $count = (int)($units['u' . $nr] ?? 0);
+            if ($count <= 0) {
+                continue;
+            }
+            $stats = BattleModel::unitCombatStats($race, $nr);
+            if ($stats['off'] <= 0 || ($stats['off'] <= $stats['def_i'] && $stats['off'] <= $stats['def_c'])) {
+                continue; // a defensive unit never leaves the village
+            }
+            $offensive[$nr] = $count;
+        }
+        if (!sizeof($offensive)) {
+            return 0;
+        }
+        $ourOffence = $this->offenceStrength($race, $offensive);
+        $free = [];
+        $guarded = [];
+        foreach ($this->pickOasisTargets($kid, $owner) as $oasis) {
+            if ($oasis['guards'] > 0) {
+                $guarded[] = $oasis;
+            } else {
+                $free[] = $oasis;
+            }
+        }
+        // A cleared oasis is instant income; a guarded one is the "clear it
+        // first" phase, so it is only started on a share of the runs - otherwise
+        // the bots would only ever collect from the oases that are already open
+        // and no new one would ever be cleared.
+        $candidates = $free;
+        if (sizeof($guarded) && mt_rand(1, 100) <= $this->oasisClearChance()) {
+            $candidates = array_merge($guarded, $free);
+        }
+        foreach ($candidates as $oasis) {
+            $toSend = array_fill(1, 11, 0);
+            if ($oasis['guards'] > 0) {
+                // Never walk into a fight the army cannot win: a wiped wave
+                // leaves the oasis closed *and* the bot without an army.
+                if ($ourOffence < $this->estimateDefence($oasis['kid']) * $this->oasisClearRatio()) {
+                    continue; // too strong for now: try the next candidate
+                }
+                // Guards: send everything that can attack, or the run dies and
+                // the oasis never opens up.
+                foreach ($offensive as $nr => $count) {
+                    $toSend[$nr] = $count;
+                }
+            } else {
+                // Empty: a small collect run, spread over the offensive slots.
+                $left = $this->oasisCollectUnits();
+                foreach ($offensive as $nr => $count) {
+                    if ($left <= 0) {
+                        break;
+                    }
+                    $toSend[$nr] = min($count, $left);
+                    $left -= $toSend[$nr];
+                }
+            }
+            if (!array_sum($toSend)) {
+                continue;
+            }
+            if (!$this->sendRaid($kid, $oasis['kid'], $owner, $race, $toSend)) {
+                continue;
+            }
+            $db->query("REPLACE INTO bot_oasis (uid, kid, last_raid) VALUES ("
+                . (int)$owner . ", " . $oasis['kid'] . ", " . time() . ")");
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * Free oases this bot has not stripped recently, cheapest first: the ones
+     * without guards (instant income) before the guarded ones. The LEFT JOIN on
+     * bot_oasis keeps oases the bot has never touched in the running; the
+     * cooldown is what stops it from raiding the same empty oasis every tick.
+     *
+     * @return array<int, array{kid:int, guards:int, dist:float}>
+     */
+    private function pickOasisTargets($kid, $owner)
+    {
+        $db = DB::getInstance();
+        $xy = Formulas::kid2xy($kid);
+        $totalCoordinate = 1 + (2 * MAP_SIZE);
+        $totalCoordinate2 = 1 + (3 * MAP_SIZE);
+        $distance = "SQRT(POW(((w.x-{$xy['x']}+{$totalCoordinate2})%{$totalCoordinate} - " . MAP_SIZE . "), 2) + POW(((w.y-{$xy['y']}+{$totalCoordinate2})%{$totalCoordinate} - " . MAP_SIZE . "), 2))";
+        $maxDistance = $this->oasisMaxDistance();
+        $cooldown = $this->oasisCooldown();
+        $now = time();
+        $guards = "COALESCE(gu.u1,0)+COALESCE(gu.u2,0)+COALESCE(gu.u3,0)+COALESCE(gu.u4,0)+COALESCE(gu.u5,0)"
+            . "+COALESCE(gu.u6,0)+COALESCE(gu.u7,0)+COALESCE(gu.u8,0)+COALESCE(gu.u9,0)+COALESCE(gu.u10,0)";
+        $result = $db->query("SELECT o.kid, $guards AS guards, $distance AS dist
+                              FROM odata o
+                              JOIN wdata w ON w.id = o.kid
+                              LEFT JOIN units gu ON gu.kid = o.kid
+                              LEFT JOIN bot_oasis b ON b.kid = o.kid AND b.uid = " . (int)$owner . "
+                              WHERE o.owner = 0 AND o.did = 0
+                                AND (b.last_raid IS NULL OR b.last_raid + $cooldown <= $now)
+                                AND $distance <= $maxDistance
+                              ORDER BY ($guards > 0) ASC, dist ASC
+                              LIMIT " . self::OASIS_CANDIDATES);
+        $out = [];
+        while ($row = $result->fetch_assoc()) {
+            $row['kid'] = (int)$row['kid'];
+            $row['guards'] = (int)$row['guards'];
+            $out[] = $row;
+        }
+        return $out;
+    }
+
+    /** Attack power of the units a bot is about to send. */
+    private function offenceStrength($race, array $units)
+    {
+        $total = 0;
+        foreach ($units as $nr => $count) {
+            $stats = BattleModel::unitCombatStats($race, $nr);
+            $total += $count * $stats['off'];
+        }
+        return $total;
+    }
+
+    /** Wood, clay and iron at the cap: a farming run would only fill the void. */
+    private function isStoreFull(array $village)
+    {
+        $max = (int)$village['maxstore'];
+        if ($max <= 0) {
+            return false;
+        }
+        foreach (['wood', 'clay', 'iron'] as $resource) {
+            if ((float)$village[$resource] < $max * self::STORE_FULL_RATIO) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public function oasisCollectUnits()
+    {
+        $units = (int)getCustom('botOasisCollectUnits');
+        return $units > 0 ? $units : self::OASIS_COLLECT_UNITS;
+    }
+
+    public function oasisMaxDistance()
+    {
+        $distance = (int)getCustom('botOasisMaxDistance');
+        return $distance > 0 ? $distance : self::OASIS_MAX_DISTANCE;
+    }
+
+    /** Seconds between two farming attempts of the same bot. */
+    public function oasisRotation()
+    {
+        $seconds = (int)getCustom('botOasisRotationSeconds');
+        return $seconds > 0 ? $seconds : self::OASIS_ROTATION;
+    }
+
+    /** Seconds before the same bot may strip the same oasis again. */
+    public function oasisCooldown()
+    {
+        $seconds = (int)getCustom('botOasisCooldownSeconds');
+        return $seconds > 0 ? $seconds : self::OASIS_COOLDOWN;
+    }
+
+    /** How much stronger than the guards a clearing wave has to be. */
+    public function oasisClearRatio()
+    {
+        $ratio = (float)getCustom('botOasisClearRatio');
+        return $ratio > 0 ? $ratio : self::OASIS_CLEAR_RATIO;
+    }
+
+    /** Share of the runs that go for a guarded oasis instead of a free one. */
+    public function oasisClearChance()
+    {
+        $chance = (int)getCustom('botOasisClearChance');
+        return ($chance > 0 && $chance <= 100) ? $chance : self::OASIS_CLEAR_CHANCE;
+    }
+
     // ---------------------------------------------------------------- gold ----
 
     /**
@@ -554,6 +867,7 @@ class BotWarModel
                               WHERE access = 3
                                 AND botLastGold + " . self::GOLD_COOLDOWN . " <= $now
                                 AND gift_gold + bought_gold >= " . (int)$config->gold->plusGold . "
+                              ORDER BY botLastGold ASC, id ASC
                               LIMIT 40");
         while ($row = $result->fetch_assoc()) {
             $uid = (int)$row['id'];

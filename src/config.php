@@ -275,6 +275,23 @@ $config = (object)[
         // The stock code trained only when there was nothing left to build,
         // which on a 1x world meant never: no bot ever had an army.
         'botTrainChance'                          => 45,
+        // Bots farm unoccupied oases for resources. An oasis that still has its
+        // guards is hit with one big wave (a 10 unit run would be wiped), then
+        // small recurring runs carry the resources home - this is the income that
+        // keeps a bot growing after it has spent its own production on troops.
+        'botOasisFarmEnabled'                     => true,
+        'botOasisCollectUnits'                    => 10,
+        'botOasisMaxDistance'                     => 12,
+        // Seconds between two farming attempts of the same bot (fair rotation),
+        // and before the same bot may strip the same oasis again - the oasis has
+        // to regenerate in between or the run brings nothing home.
+        'botOasisRotationSeconds'                 => 900,
+        'botOasisCooldownSeconds'                 => 1800,
+        // The clearing wave only goes out when the army is this many times
+        // stronger than the guards, and only on this share of the runs (the rest
+        // collect from oases that are already open).
+        'botOasisClearRatio'                      => 2,
+        'botOasisClearChance'                     => 35,
         'startMedalsAtStartOfWeek'                => false,
         'realCancelAttack'                        => true,
         'makeAuctionsCheaperInSell'               => false,

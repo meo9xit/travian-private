@@ -12,6 +12,20 @@ use function make_seed;
 
 class FakeUserModel
 {
+    /**
+     * Bot villages that get an AI step per automation tick. The job runs every
+     * 90 seconds, so this is ~40 villages per 90 seconds = enough to walk the
+     * whole bot population in a few minutes on a normal world.
+     */
+    const AI_VILLAGES_PER_RUN = 40;
+
+    /**
+     * Most AI steps a single village may catch up with in one tick. A village
+     * that was skipped for hours would otherwise burn its whole store (and its
+     * whole building queue) in one go.
+     */
+    const MAX_CATCHUP_STEPS = 6;
+
     public function handleFakeUsers()
     {
         if (!$this->canRun()) return;
@@ -37,15 +51,31 @@ class FakeUserModel
         } else {
             $interval = mt_rand(50, 150);
         }
-        $limit = 10;
+        // Fair rotation over *all* bot villages. Without the ORDER BY, MySQL
+        // returned the rows in primary-key order, so every tick the same ~30
+        // lowest kid numbers were the only ones eligible (each of them stays
+        // stamped for $checkInterval seconds) and every other bot village never
+        // got an AI step at all - that is the "half the bots grow, the rest
+        // stand still" symptom. Oldest first means every village gets its turn
+        // and the ones that waited longest are served first.
         $checkInterval = 200;
         $time = time() - $checkInterval;
         $now = time();
-        $results = $db->query("SELECT kid, lastVillageCheck FROM vdata v WHERE lastVillageCheck < $time AND (SELECT access FROM users WHERE id=v.owner)=3 LIMIT $limit");
+        $results = $db->query("SELECT kid, lastVillageCheck
+                               FROM vdata v
+                               WHERE lastVillageCheck < $time
+                                 AND (SELECT access FROM users WHERE id=v.owner)=3
+                               ORDER BY lastVillageCheck ASC, kid ASC
+                               LIMIT " . self::AI_VILLAGES_PER_RUN);
         while ($row = $results->fetch_assoc()) {
             $db->query("UPDATE vdata SET lastVillageCheck=$now WHERE kid={$row['kid']}");
             if ($row['lastVillageCheck'] <= 10) continue;
-            $count = ceil(($now - $row['lastVillageCheck']) / $interval);
+            // A village that was skipped for a while catches up, but only up to
+            // a point: a burst of steps is not the goal of the feature.
+            $count = (int)ceil(($now - $row['lastVillageCheck']) / $interval);
+            if ($count > self::MAX_CATCHUP_STEPS) {
+                $count = self::MAX_CATCHUP_STEPS;
+            }
             AI::doSomethingRandom($row['kid'], $count);
         }
 
@@ -55,6 +85,9 @@ class FakeUserModel
             $war->defendThreatenedVillages();
             $war->processRaids();
         }
+        // Farming runs even when raiding is off: it is what keeps a bot growing
+        // once its own production is spent on troops (see BotWarModel::processOasisFarming).
+        $war->processOasisFarming();
         $war->spendGold();
     }
 
@@ -86,7 +119,14 @@ class FakeUserModel
         $time = time() - $interval;
         $db = DB::getInstance();
         $register = new RegisterModel();
-        $result = $db->query("SELECT id, race, lastVillageExpand FROM users WHERE access=3 AND lastVillageExpand<=$time LIMIT $limit");
+        // Oldest first, like the AI step above: without the ORDER BY the same
+        // low ids were returned every run and the rest of the bots never
+        // expanded at all.
+        $result = $db->query("SELECT id, race, lastVillageExpand
+                              FROM users
+                              WHERE access=3 AND lastVillageExpand<=$time
+                              ORDER BY lastVillageExpand ASC, id ASC
+                              LIMIT $limit");
         while ($row = $result->fetch_assoc()) {
             $db->query("UPDATE users SET lastVillageExpand=" . ($time + $interval) . " WHERE id={$row['id']}");
             if ($row['lastVillageExpand'] == 0) {

@@ -213,7 +213,12 @@ class NatarsModel
         $limit = 10;
         $time = time() - $checkInterval;
         $now = time();
-        $result = $db->query("SELECT kid, lastVillageCheck FROM vdata WHERE owner=1 AND isWW=0 AND isFarm=0 AND isArtifact=0 AND lastVillageCheck > 0 AND lastVillageCheck <= $time LIMIT $limit");
+        $result = $db->query("SELECT kid, lastVillageCheck
+                              FROM vdata
+                              WHERE owner=1 AND isWW=0 AND isFarm=0 AND isArtifact=0
+                                AND lastVillageCheck > 0 AND lastVillageCheck <= $time
+                              ORDER BY lastVillageCheck ASC, kid ASC
+                              LIMIT $limit");
         while ($row = $result->fetch_assoc()) {
             $db->query("UPDATE vdata SET lastVillageCheck=$now WHERE kid={$row['kid']}");
             if ($row['lastVillageCheck'] <= 10) continue;
