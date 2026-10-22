@@ -64,6 +64,10 @@
 #                     through 127.0.0.53, which fails inside the build namespace
 #                     ("Temporary failure resolving 'archive.debian.org'").
 #   --no-engine       do not start the automation daemon
+#   --no-php-patch    do NOT rebuild PHP 7.3.33 with the CVE-2026-109618 /
+#                     CVE-2026-109619 fix. Fallback for when the source rebuild
+#                     fails on your host; the php.ini / Apache mitigations are
+#                     still applied, but they are not a complete fix.
 #   --force           reinstall the world (DROPS its database) even if installed
 #   --dry-run         only write the deployment files, do not touch Docker
 #   --yes             never ask for confirmation
@@ -99,6 +103,7 @@ TLS=0
 ACME_EMAIL=""
 PHP_IMAGE_TAG="travium-php:7.3"
 BUILD_NETWORK="host"
+PHP_CVE_PAT=1
 COMMAND=""
 POSITIONAL=()
 
@@ -114,7 +119,7 @@ ok()   { printf '%s\n' "${C_GREEN} ok ${C_RESET} $*"; }
 warn() { printf '%s\n' "${C_YELLOW}warn${C_RESET} $*" >&2; }
 die()  { printf '%s\n' "${C_RED}fail${C_RESET} $*" >&2; exit 1; }
 step() { printf '\n%s\n' "${C_BOLD}--- $* ---${C_RESET}"; }
-usage() { sed -n '2,56p' "$SCRIPT_DIR/$SCRIPT_NAME" | sed -e 's/^#\{1,2\}//' -e 's/^ //'; exit 0; }
+usage() { awk 'NR>1 && /^set -Eeuo pipefail$/{exit} NR>1' "$SCRIPT_DIR/$SCRIPT_NAME" | sed -e 's/^#\{1,2\}//' -e 's/^ //'; exit 0; }
 
 # ---------------------------------------------------------------- parsing ----
 while [ $# -gt 0 ]; do
@@ -140,6 +145,7 @@ while [ $# -gt 0 ]; do
         --build-network) BUILD_NETWORK="${2:-}"; shift 2 ;;
         --tls) TLS=1; shift ;;
         --no-build) BUILD=0; shift ;;
+        --no-php-patch) PHP_CVE_PAT=0; shift ;;
         --no-engine) ENGINE=0; shift ;;
         --force) FORCE=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -445,8 +451,226 @@ EOF
 }
 
 gen_dockerfile() {
+    if [ "$PHP_CVE_PAT" = "1" ]; then
+        gen_dockerfile_patched
+    else
+        gen_dockerfile_plain
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Default: rebuild PHP 7.3.33 in place with the php2shell fix
+# (CVE-2026-109618 / CVE-2026-109619) compiled into the engine.
+#
+# Why a rebuild and not an update: php:7.3-apache is the last 7.3 image that
+# will ever be published (7.3 went EOL in December 2021), so there is no fixed
+# image to pull. The PHP security team shipped minimal source backports for
+# 7.4, 8.0 and 8.1 only. The flaw is in the engine, and 7.3.33 shares those
+# code paths, so deploy/php-7.3-cve-2026-109618-109619.patch ports the fix onto
+# 7.3.33. deploy/build-patch.py regenerates that patch from a pristine tree.
+#
+# The build happens inside the runtime image (not a second stage) because the
+# base image loads PHP as an Apache module: `make install` has to land in
+# exactly the /usr/local tree and re-run apxs against exactly the apache2 that
+# will load it. Copying that tree between stages only risks a mismatched module
+# path. The toolchain is purged in the same layer that used it.
+# ---------------------------------------------------------------------------
+gen_dockerfile_patched() {
+    write_file "$DEPLOY_DIR/Dockerfile" <<'EOF'
+# PHP 7.3.33 runtime for the ORIGINAL Travium source, rebuilt from source so the
+# php2shell fixes (CVE-2026-109618 / CVE-2026-109619) are compiled in.
+#
+# The PHP version is not cosmetic: composer.json pins php >=7.3 <8.0 and
+# Core\ErrorHandler turns every warning into a thrown ErrorException in CLI, so
+# the installer aborts on 7.4 ("Trying to access array offset on value of type
+# null" is a 7.4 diagnostic). bootstrap.php also dies without the redis
+# extension, and Core\Caching\Caching connects to redis on the container's own
+# loopback, so the daemon runs inside this image.
+FROM php:7.3-apache
+
+# The Debian release behind php:7.3-apache is old enough to have been moved to
+# archive.debian.org (bullseye for recent pulls, buster for older ones), and the
+# image ships snapshot.debian.org URLs, so build sources.list from the actual
+# release instead of patching theirs. Retries + IPv4 keep a flaky mirror or a
+# broken IPv6 route from failing the build ('apt-get install' then exits 100).
+RUN set -eux; \
+    . /etc/os-release; \
+    suite="${VERSION_CODENAME:-bullseye}"; \
+    case "$suite" in \
+        buster|stretch|jessie) sec="$suite/updates" ;; \
+        *) sec="$suite-security" ;; \
+    esac; \
+    printf 'deb http://archive.debian.org/debian %s main\ndeb http://archive.debian.org/debian-security %s main\n' \
+        "$suite" "$sec" > /etc/apt/sources.list; \
+    printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\nAcquire::ForceIPv4 "true";\n' \
+        > /etc/apt/apt.conf.d/99-archive; \
+    apt-get update; \
+    if ! apt-cache policy libc6 | grep -q 'Candidate: [0-9]'; then \
+        echo ""; \
+        echo "*** apt-get update downloaded NO package index."; \
+        echo "*** The build container cannot resolve/reach archive.debian.org:"; \
+        echo "***   Temporary failure resolving 'archive.debian.org'"; \
+        echo "***"; \
+        echo "*** That is the docker HOST's DNS, not a missing package. Two fixes:"; \
+        echo "***  1. build with host networking (this script already does: it runs"; \
+        echo "***     'docker build --network=host', override with --build-network)"; \
+        echo "***  2. or give the daemon working DNS:"; \
+        echo "***       cat /etc/docker/daemon.json   # look before you write"; \
+        echo "***       echo '{\"dns\":[\"1.1.1.1\",\"8.8.8.8\"]}' | sudo tee /etc/docker/daemon.json"; \
+        echo "***       sudo systemctl restart docker"; \
+        echo "***"; \
+        echo "*** Diagnose with: ./deploy-travium-docker.sh doctor"; \
+        exit 1; \
+    fi
+
+# Build deps. The libraries are the ones the configure flags and the extension
+# builds below actually need (gd -> png/jpeg/freetype, zip -> libzip,
+# mbstring -> oniguruma, argon2 for password_hash, plus the ones PHP refuses to
+# configure without: libxml2, sqlite3, curl, openssl) and apache2-dev for apxs.
+# redis-server/-tools and default-mysql-client are runtime, installed here so
+# the image keeps one apt layer: Core\Database\DB::backup() shells out to
+# mysqldump, and Core\Caching\Caching connects to redis on the container's own
+# loopback.
+RUN set -eux; \
+    pkgs="build-essential autoconf pkg-config patch ca-certificates curl xz-utils \
+          apache2-dev libxml2-dev libsqlite3-dev libcurl4-openssl-dev libssl-dev \
+          zlib1g-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev libzip-dev \
+          libonig-dev libargon2-dev \
+          redis-server redis-tools unzip default-mysql-client"; \
+    apt-get install -y --no-install-recommends $pkgs \
+    || { \
+        echo "apt-get install failed - refreshing indexes and retrying once"; \
+        apt-get update || true; \
+        apt-get install -y --no-install-recommends $pkgs || { \
+            echo "=== apt diagnostics ==="; \
+            . /etc/os-release; echo "release: $PRETTY_NAME"; \
+            grep -v '^#' /etc/apt/sources.list | grep -v '^$'; \
+            for p in $pkgs; do printf '%-26s %s\n' "$p" "$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/{print $2}')"; done; \
+            exit 100; \
+        }; \
+    }; \
+    rm -rf /var/lib/apt/lists/*
+
+# --- the php2shell fix ------------------------------------------------------
+# The patch is a repo file, not generated here, so what gets compiled is
+# reviewable and pinned. Every step is checked, because a silently skipped hunk
+# would leave the interpreter vulnerable while the build still succeeds:
+#   * the tarball sha256 is the one php.net publishes for 7.3.33,
+#   * `patch --dry-run` must accept every hunk before anything is written,
+#   * after patching, the sources must contain the markers the fix introduces.
+# The .docker-extracted marker stops docker-php-ext-install (used below) from
+# re-extracting the stock tarball over the patched tree.
+COPY php-7.3-cve-2026-109618-109619.patch /usr/src/php-cve.patch
+
+ARG PHP_VERSION=7.3.33
+ARG PHP_SHA256=9a369c32c6f52036b0a890f290327f148a1904ee66aa56e2c9a7546da6525ec8
+RUN set -eux; \
+    curl -fsSL -o /tmp/php.tar.gz "https://museum.php.net/php7/php-${PHP_VERSION}.tar.gz"; \
+    echo "${PHP_SHA256}  /tmp/php.tar.gz" | sha256sum -c -; \
+    mkdir -p /usr/src/php; \
+    tar -xzf /tmp/php.tar.gz -C /usr/src/php --strip-components=1; \
+    rm -f /tmp/php.tar.gz; \
+    cd /usr/src/php; \
+    patch -p1 --dry-run < /usr/src/php-cve.patch; \
+    patch -p1 < /usr/src/php-cve.patch; \
+    grep -q 'zend_mm_safe_error_ex' Zend/zend_alloc.c; \
+    grep -q 'zend_new_array_singleton' Zend/zend_hash.c; \
+    grep -q 'max_multipart_body_parts' main/rfc1867.c; \
+    grep -q 'rfc1867_enabled) || true' ext/session/session.c; \
+    touch /usr/src/php/.docker-extracted; \
+    echo "php2shell backport applied to PHP ${PHP_VERSION}"
+
+# Same feature set the stock php:7.3-apache image was built with (so the Apache
+# module keeps loading into the same apache2), plus nothing the game does not
+# need. --with-libdir is what makes configure find the multiarch libraries on
+# Debian; the official image passes it for 7.x.
+# --enable-option-checking=fatal: a typo in a flag fails the build instead of
+# silently dropping something the game needs at runtime.
+RUN set -eux; \
+    cd /usr/src/php; \
+    gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)"; \
+    ./configure \
+        --build="$gnuArch" \
+        --with-libdir="lib/$(dpkg-architecture --query DEB_BUILD_MULTIARCH)" \
+        --sysconfdir=/usr/local/etc \
+        --with-config-file-path=/usr/local/etc/php \
+        --with-config-file-scan-dir=/usr/local/etc/php/conf.d \
+        --enable-option-checking=fatal \
+        --with-mhash \
+        --with-pic \
+        --enable-mbstring \
+        --enable-mysqlnd \
+        --with-password-argon2 \
+        --with-pdo-sqlite=/usr \
+        --with-sqlite3=/usr \
+        --with-curl \
+        --with-openssl \
+        --with-zlib \
+        --with-apxs2 \
+        --disable-cgi \
+        --disable-phpdbg; \
+    make -j"$(nproc)"; \
+    make install
+
+# Extensions the game needs, compiled against the freshly installed engine:
+#   mysqli    - Core\Database\DB uses `new \mysqli(...)`, not PDO
+#   pdo_mysql - Core\Database\DBI and the installer use PDO
+#   gd        - InstallerModel / map + hero images
+#   zip       - installer / asset handling
+#   mbstring  - functions.general.php
+#   pcntl     - src/AutomationEngine.php (pcntl_fork, pcntl_signal)
+#   opcache   - speed
+RUN set -eux; \
+    docker-php-ext-configure gd --with-freetype-dir=/usr/include/ --with-jpeg-dir=/usr/include/; \
+    docker-php-ext-install -j"$(nproc)" mysqli pdo_mysql gd zip mbstring pcntl opcache
+
+# php-redis 5.3.7 is the last release that supports PHP 7.3.
+RUN set -eux; \
+    pecl install redis-5.3.7; \
+    docker-php-ext-enable redis
+
+# integrations/install/index.php shells out to a hardcoded /usr/bin/php7.3.
+RUN ln -sf /usr/local/bin/php /usr/bin/php7.3
+
+RUN a2enmod rewrite headers setenvif alias
+
+# The toolchain stays: purging the -dev packages would also remove the runtime
+# libraries gd/zip/mbstring link against (libpng16-16, libzip, libonig) unless
+# they are reinstalled by hand, and a wrong guess there turns into a 500 at
+# runtime instead of a build error. The image is a game server, not a shared
+# host, so the extra ~200 MB is the cheaper trade.
+RUN rm -rf /usr/src/php /usr/src/php-cve.patch /tmp/pear /var/lib/apt/lists/*
+
+# php2shell: prove the *loaded* interpreter is the rebuilt one. These read the
+# running binary, not a file on disk, so a stale module cannot pass them.
+RUN set -eux; \
+    php -v | head -n1 | grep -q 'PHP 7\.3\.33'; \
+    php -r 'exit(ini_get("max_multipart_body_parts") === false ? 1 : 0);' \
+        || { echo "*** max_multipart_body_parts is missing: the php2shell patch is NOT in this build"; exit 1; }; \
+    php -m | grep -qx redis; \
+    php -m | grep -qx mysqli; \
+    php -m | grep -qx gd; \
+    php -m | grep -qx mbstring; \
+    echo "runtime php $(php -r 'echo PHP_VERSION;') carries the php2shell fix"
+
+WORKDIR /var/www/app
+EXPOSE 80
+EOF
+    ok "Dockerfile    PHP 7.3.33 rebuilt with the php2shell fix"
+}
+
+# Fallback for --no-php-patch: the stock php:7.3-apache binaries, which are
+# still vulnerable to CVE-2026-109618 / CVE-2026-109619. Only the php.ini and
+# Apache mitigations generated by gen_php_hardening / gen_vhost apply.
+gen_dockerfile_plain() {
     write_file "$DEPLOY_DIR/Dockerfile" <<'EOF'
 # PHP 7.3 runtime for the ORIGINAL Travium source.
+#
+# WARNING: this image runs the stock php:7.3-apache binaries, which ARE
+# vulnerable to CVE-2026-109618 and CVE-2026-109619 (php2shell). It is only
+# generated with --no-php-patch. The php.ini and Apache mitigations this script
+# writes reduce exposure but do not remove the vulnerability - rebuild without
+# --no-php-patch to get the patched interpreter.
 #
 # The version is not cosmetic: composer.json pins php >=7.3 <8.0 and
 # Core\ErrorHandler turns every warning into a thrown ErrorException in CLI, so
@@ -528,7 +752,116 @@ RUN a2enmod rewrite headers setenvif alias
 WORKDIR /var/www/app
 EXPOSE 80
 EOF
-    ok "Dockerfile"
+    warn "Dockerfile    built WITHOUT the php2shell fix (--no-php-patch)"
+}
+
+# The interpreter patch is a repo file. Copy it next to the generated Dockerfile
+# so `docker build` can COPY it; fail loudly rather than emit a Dockerfile whose
+# COPY refers to a file that is not there.
+gen_php_cve_patch() {
+    local src="$SCRIPT_DIR/deploy/php-7.3-cve-2026-109618-109619.patch"
+    [ "$PHP_CVE_PAT" = "1" ] || return 0
+    [ -f "$src" ] || die "missing the php2shell patch: $src (run from a full checkout, or use --no-php-patch)"
+    cp -f "$src" "$DEPLOY_DIR/php-7.3-cve-2026-109618-109619.patch"
+    chmod 0644 "$DEPLOY_DIR/php-7.3-cve-2026-109618-109619.patch"
+    ok "php2shell     $(basename "$src") ($(wc -l <"$src" | tr -d ' ') lines)"
+}
+
+# php.ini hardening, mounted into conf.d. Two jobs:
+#   1. the vendor's temporary mitigations for php2shell, which still matter as
+#      defence in depth even with the patched engine;
+#   2. the request-shape limits that make the exploit primitives (unbounded
+#      multipart parts, controllable OOM) hard to reach in the first place.
+# This game has no upload form, so uploads are switched off entirely.
+gen_php_hardening() {
+    write_file "$DEPLOY_DIR/php-hardening.ini" <<'EOF'
+; Hardening for CVE-2026-109618 / CVE-2026-109619 ("php2shell") and general
+; request limits - generated by deploy-travium-docker.sh.
+;
+; The engine itself is patched (see the Dockerfile). These settings are the
+; vendor's documented mitigations plus limits for the request shapes the
+; exploits need, so a second bug in the same family still has no way in.
+
+; --- php2shell mitigations -------------------------------------------------
+; Session upload progress initialises a session while the request body is still
+; being parsed, before modules are activated. The patched engine no longer
+; leaves state behind on that path, and this turns the feature off as well:
+; nothing in this game uses it.
+session.upload_progress.enabled = 0
+session.upload_progress.cleanup = On
+
+; Cap the multipart parts a request may declare. Default would be
+; max_input_vars + max_file_uploads; a fixed small number is stricter.
+max_multipart_body_parts = 64
+
+; Uploads are not used by the game: no form has enctype="multipart/form-data"
+; and nothing calls move_uploaded_file(). Zero disables file uploads, which
+; removes the multipart parse path the exploits abuse.
+file_uploads = Off
+max_file_uploads = 0
+
+; The OOM trigger needs a request that can push PHP over memory_limit. These
+; keep a single request small; memory_limit itself stays finite so one bad
+; request cannot exhaust the host (the container's memory limit is the second
+; wall). The vendor's mitigation is memory_limit=-1 - that only makes sense on
+; an unpatched engine, where the alternative is leaving the RCE reachable.
+post_max_size = 16M
+upload_max_filesize = 8M
+max_input_vars = 2000
+max_input_nesting_level = 32
+max_execution_time = 120
+
+; --- general ----------------------------------------------------------------
+expose_php = Off
+display_errors = Off
+display_startup_errors = Off
+log_errors = On
+allow_url_include = Off
+allow_url_fopen = On
+
+; Sessions: the game sets its own cookie parameters, but a strict, HttpOnly,
+; SameSite default costs nothing.
+session.use_strict_mode = 1
+session.use_only_cookies = 1
+session.cookie_httponly = 1
+session.cookie_samesite = Lax
+
+; No diagnostic may be emitted before request initialisation - that is the
+; window php2shell abuses. Deprecations from old code would do exactly that.
+error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+EOF
+    ok "php.ini       php-hardening.ini"
+}
+
+# Server-scoped Apache hardening. These directives are illegal inside a
+# <VirtualHost>, so they go in their own conf-enabled file. Mounted read-only.
+gen_apache_hardening() {
+    write_file "$DEPLOY_DIR/000-travium-hardening.conf" <<'EOF'
+# Server-level hardening - generated by deploy-travium-docker.sh.
+# Confirmed in conf-enabled/ so it is read before the vhost.
+
+# Do not advertise the exact version: banner grabbing is the first step of most
+# scans, and this is a game server, not a target.
+ServerTokens Prod
+ServerSignature Off
+
+# TRACE echoes the request back, including headers. Nothing here uses it.
+TraceEnable Off
+
+# php2shell: the exploit needs a request that stays under post_max_size while
+# still being large and slow to parse. These bound header/line size and the time
+# a client may take to send a request, so a worker cannot be pinned mid-parse.
+<IfModule mod_reqtimeout.c>
+    RequestReadTimeout header=20-40,MinRate=500 body=20,MinRate=500
+</IfModule>
+
+# Defaults are generous (100 headers, 8190 bytes each); tighten them. The game
+# sends a handful of cookies and normal form posts.
+LimitRequestFields 64
+LimitRequestFieldSize 4096
+LimitRequestLine 4096
+EOF
+    ok "apache       000-travium-hardening.conf"
 }
 
 gen_mail_capture() {
@@ -563,6 +896,16 @@ gen_vhost() {
         SetEnvIf X-Forwarded-Proto \"^https\$\" HTTPS=on
 "
     fi
+    # max_multipart_body_parts only exists once the engine patch is compiled in.
+    # mod_php aborts the whole server on a php_value for an unknown directive
+    # ("Invalid php_value directive"), so the line is emitted only when it will
+    # resolve. The ini file carries the same setting for the patched build.
+    local php2shell_ini=""
+    if [ "$PHP_CVE_PAT" = "1" ]; then
+        php2shell_ini="    # Bounds the number of multipart parts (the patch adds this ini entry).
+    php_value max_multipart_body_parts 64
+"
+    fi
     write_file "$DEPLOY_DIR/apache-vhost.conf" <<EOF
 # Single-host layout, rendered by $SCRIPT_NAME for world '$WORLD'.
 #
@@ -581,6 +924,42 @@ gen_vhost() {
 <VirtualHost *:80>
     ServerName $HOST
     DocumentRoot /var/www/app/servers/$WORLD/public
+
+    # --- php2shell / request-shape limits -----------------------------------
+    # CVE-2026-109618 is reachable through a request whose *declared* length
+    # stays under post_max_size while the bytes actually consumed do not (chunked
+    # or lengthless HTTP/2 bodies), which is how the exploit reaches memory_limit.
+    # Apache is the layer that can see the real size, so cap it here as well as
+    # in php-hardening.ini. The game has no upload form; 16M is generous.
+    LimitRequestBody 16777216
+    # Slow/malformed multipart bodies that keep a worker busy are the other half
+    # of the trick: a worker that times out mid-parse is a worker whose request
+    # state is torn down early.
+    Timeout 60
+    <IfModule mod_reqtimeout.c>
+        RequestReadTimeout header=20-40,MinRate=500 body=20,MinRate=500
+    </IfModule>
+
+    # No TRACE: it reflects request headers and nothing here needs it.
+    # (TraceEnable itself is server-level, so it lives in 000-travium-hardening.conf
+    #  written by gen_apache_hardening, not inside this vhost.)    <IfModule mod_headers.c>
+        Header always set X-Content-Type-Options "nosniff"
+        Header always set X-Frame-Options "SAMEORIGIN"
+        Header always set Referrer-Policy "strict-origin-when-cross-origin"
+        Header unset X-Powered-By
+    </IfModule>
+
+    # PHP diagnostics must never reach a client: a warning printed before the
+    # request is fully initialised is exactly the window the exploits use.
+    php_flag display_errors Off
+    php_flag display_startup_errors Off
+    php_value session.upload_progress.enabled 0
+$php2shell_ini    php_admin_flag file_uploads Off
+    php_admin_value post_max_size 16M
+    # php_value, not php_admin_value: the map, backup and installer pages raise
+    # this themselves with ini_set("memory_limit", -1). An admin value would
+    # make those ini_set() calls silently fail and break the map generator.
+    php_value memory_limit 512M
 
     Alias /cdn /var/www/app/integrations/cdn
     Alias /portal /var/www/app/homepage
@@ -703,6 +1082,11 @@ $ports_block
       - ./apache-vhost.conf:/etc/apache2/sites-available/000-default.conf:ro
       - ./mail-capture.sh:/usr/local/bin/mail-capture.sh:ro
       - ./php-mail-capture.ini:/usr/local/etc/php/conf.d/zz-mail-capture.ini:ro
+      # php2shell mitigations + request limits. Mounted rather than baked in so
+      # a rebuilt image cannot silently lose them.
+      - ./php-hardening.ini:/usr/local/etc/php/conf.d/zz-php-hardening.ini:ro
+      # Server-scoped Apache directives (TraceEnable, ServerTokens, reqtimeout).
+      - ./000-travium-hardening.conf:/etc/apache2/conf-enabled/000-travium-hardening.conf:ro
     working_dir: /var/www/app
     environment:
       TRAVIUM_WORLD: "$WORLD"
@@ -802,7 +1186,17 @@ EOF
 
 gen_global_config() {
     local backup=""
-    if [ -f "$SRC_DIR/config.php" ]; then cp -f "$SRC_DIR/config.php" "$SRC_DIR/config.php.bak"; backup=" (previous file saved as config.php.bak)"; fi
+    # Keep the FIRST backup of a hand-edited config.php. Overwriting it on every
+    # run means the second run backs up the file the first run generated, and the
+    # original is gone - which is exactly how a local config gets lost.
+    if [ -f "$SRC_DIR/config.php" ]; then
+        if [ ! -f "$SRC_DIR/config.php.orig" ]; then
+            cp -f "$SRC_DIR/config.php" "$SRC_DIR/config.php.orig"
+            backup=" (previous file saved as config.php.orig)"
+        else
+            backup=" (original kept as config.php.orig)"
+        fi
+    fi
     write_file "$SRC_DIR/config.php" <<EOF
 <?php
 // Global (out-of-game) configuration - generated by $SCRIPT_NAME.
@@ -1061,14 +1455,24 @@ gen_all_files() {
     step "generating deployment files ($DEPLOY_DIR)"
     ensure_env_file
     gen_dockerfile
+    gen_php_cve_patch
+    gen_php_hardening
+    gen_apache_hardening
     gen_apt_probe
     gen_mail_capture
     gen_vhost
     gen_compose
     gen_caddyfile
-    gen_global_config
-    gen_world_files
-    gen_bots_helper
+    # These three write into the source tree, not into $DEPLOY_DIR, and they
+    # carry this deployment's database passwords. A --dry-run must not touch
+    # them: it is how you look at what would be generated, not a deploy.
+    if [ "$DRY_RUN" = "1" ]; then
+        warn "config.php and servers/$WORLD/ are left untouched (dry run)"
+    else
+        gen_global_config
+        gen_world_files
+        gen_bots_helper
+    fi
     echo
 }
 
@@ -1456,6 +1860,29 @@ do_doctor() {
     step "port"
     echo "port    $PORT"
     warn_if_port_busy
+
+    step "php2shell (CVE-2026-109618 / CVE-2026-109619)"
+    if [ "$PHP_CVE_PAT" = "1" ]; then
+        ok "the next build patches PHP 7.3.33 and rebuilds it from source"
+        if [ -f "$SCRIPT_DIR/deploy/php-7.3-cve-2026-109618-109619.patch" ]; then
+            echo "patch   $(wc -l <"$SCRIPT_DIR/deploy/php-7.3-cve-2026-109618-109619.patch" | tr -d ' ') lines, $(grep -c '^--- a/' "$SCRIPT_DIR/deploy/php-7.3-cve-2026-109618-109619.patch") files"
+        else
+            warn "deploy/php-7.3-cve-2026-109618-109619.patch is missing - the build will fail"
+        fi
+        # Is the container that is running right now the patched one?
+        if compose ps web >/dev/null 2>&1 && [ -n "$(compose ps -q web 2>/dev/null)" ]; then
+            if compose exec -T web php -r 'exit(ini_get("max_multipart_body_parts") === false ? 1 : 0);' >/dev/null 2>&1; then
+                ok "the running container IS patched: $(compose exec -T web php -r 'echo PHP_VERSION;' 2>/dev/null)"
+            else
+                warn "the running container is NOT patched - rebuild it:"
+                warn "  $SCRIPT_NAME install          (rebuilds the image, keeps the world data)"
+            fi
+        else
+            log "no running web container to inspect"
+        fi
+    else
+        warn "--no-php-patch is in effect: the image will be VULNERABLE to php2shell"
+    fi
 
     step "dns inside containers (the cause of 'Temporary failure resolving')"
     log "resolv.conf a normal container gets:"

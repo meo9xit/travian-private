@@ -3,6 +3,14 @@
 *.sh text eol=lf
 deploy-travium-docker.sh text eol=lf
 
+# The PHP backport patch is fed to `patch -p1` inside the Linux build image. A
+# CRLF patch does not match LF sources, so a Windows checkout with autocrlf=true
+# would break the build if this file were converted.
+*.patch text eol=lf
+
+# Helper scripts: same reason (they are run on the host, and diffed).
+*.py text eol=lf
+
 # Normalise text files.
 *.php text
 *.js text
