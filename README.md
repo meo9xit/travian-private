@@ -112,6 +112,37 @@ At the end you’ll see:
 
 ---
 
+## Security
+
+### php2shell — CVE-2026-109618 / CVE-2026-109619 (fixed)
+
+Two critical PHP engine vulnerabilities (unauthenticated RCE, CVSS 9.2,
+published 21 October 2026). Every PHP release back to 5.4 is affected, so the
+PHP 7.3 this game is pinned to is affected too, and 7.3 is end-of-life with no
+fixed image to pull.
+
+The Docker image is therefore **rebuilt from source with the fix compiled in**:
+`deploy/php-7.3-cve-2026-109618-109619.patch` ports PHP's own 7.4 backport onto
+7.3.33, and the build verifies the tarball sha256, the patch application and the
+resulting binary. On top of that, `php-hardening.ini` and the generated Apache
+vhost switch off the request shapes the exploit needs (upload progress,
+multipart uploads, unbounded parts, oversized bodies).
+
+Check what a running container actually has:
+
+```bash
+./deploy-travium-docker.sh doctor
+docker compose exec web php -i | grep max_multipart_body_parts
+```
+
+Details, the full change list and the residual risk (7.3 is still a legacy
+runtime — the real fix is moving to PHP 8): [docs/php2shell.md](docs/php2shell.md).
+
+`--no-php-patch` falls back to the stock, vulnerable image for hosts where the
+source build fails. The mitigations still apply, but they are not a complete fix.
+
+---
+
 ## Contributing
 
 * Fork, branch, commit

@@ -1,6 +1,9 @@
 # Global config: generated per deployment by deploy-travium-docker.sh and it
 # holds database credentials.
 config.php
+# First backup of a hand-edited config.php, kept by the deploy script.
+config.php.orig
+config.php.bak
 
 # One game world. servers/<world>/ is generated from server.tpl by the deploy
 # script and contains per-world settings (with db credentials), logs, backups.
