@@ -34,6 +34,15 @@ class MinimapCtrl extends AnyCtrl
         if ($memcache->exists("minimap.gif") && !isset($_GET['noCache'])) return false;
         ini_set("memory_limit", -1);
         $img = imagecreatefrompng(PUBLIC_PATH . "img/map/tile/1x1/basic.png");
+        // The source is a palette (indexed) PNG holding only 79 of the 256 available palette
+        // slots, and imagecolorallocatealpha() adds a NEW entry on every call. The map has
+        // (2 * MAP_SIZE + 1)^2 fields, so allocation fails after roughly 170 villages; every
+        // later village is then drawn with an invalid colour and vanishes from the minimap.
+        // Promote to truecolor so allocations no longer consume palette slots.
+        if (function_exists('imagepalettetotruecolor') && !imageistruecolor($img)) {
+            imagepalettetotruecolor($img);
+        }
+        imagealphablending($img, true);
         $db = DB::getInstance();
         $rate_x = 185 / (2 * MAP_SIZE + 1);
         $rate_y = 109 / (2 * MAP_SIZE + 1);
@@ -47,18 +56,19 @@ class MinimapCtrl extends AnyCtrl
                 imagesetpixel($img, $x, $y, imagecolorallocatealpha($img, $rgb['r'], $rgb['g'], $rgb['b'], 0));
             }
             $distance = hypot($row['x'], $row['y']);
-            $rnd = mt_rand(50, 80);
-            if ($distance >= ($max - 3)) {
-                $rnd = 0;
-            }
+            // GIF cannot store partial alpha, so the old 50..80 "alpha" values were flattened to
+            // opaque and the fade-out never happened. Darken the colour along the same gradient
+            // instead, which survives GIF encoding.
+            $fade = $max > 0 ? min(1, max(0, $distance / $max)) : 0;
+            $fadePercent = 100 - (int)round($fade * 25);
             if ($row['fieldtype'] && $row['occupied']) {
                 $race = (int) $db->fetchScalar("SELECT race FROM units WHERE kid={$row['id']}");
                 if ($race) {
                     if ($race == 5) {
                         $race = 1;
                     }
-                    $rgb = $this->hex2rgb($this->colors['tribes'][$race]);
-                    imagesetpixel($img, $x, $y, imagecolorallocatealpha($img, $rgb['r'], $rgb['g'], $rgb['b'], $rnd));
+                    $rgb = $this->hex2rgb($this->color_blend_by_opacity($this->colors['tribes'][$race], $fadePercent, 'FFFFFF'));
+                    imagesetpixel($img, $x, $y, imagecolorallocate($img, $rgb['r'], $rgb['g'], $rgb['b']));
                 }
             }
         }
