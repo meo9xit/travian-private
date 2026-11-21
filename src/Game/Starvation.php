@@ -71,7 +71,14 @@ class Starvation
         $this->starveInactiveTroops();
         $this->starveAfootTroops();
 
-        $crop = $this->currentCrop - $this->villageRow['crop'];
+        // currentCrop is negative here (that is why the village is starving).
+        // Storing that negative value in the database is what used to break the
+        // crop bar: the UI only ever shows max(crop, 0), so the village looked
+        // stuck on "0" while the deficit kept growing, and every resource added
+        // later (market delivery, NPC trade, gold package) was swallowed before
+        // it became visible. The deficit is paid by losing troops, not by a
+        // negative stock, so persist 0 instead.
+        $crop = max(0, $this->currentCrop) - $this->villageRow['crop'];
 
         $wood = $elapsedTime * ($this->villageRow['woodp'] / 3600000);
         $clay = $elapsedTime * ($this->villageRow['clayp'] / 3600000);

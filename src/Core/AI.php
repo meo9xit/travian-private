@@ -51,7 +51,7 @@ class AI_MAIN
     public function __construct($kid)
     {
         $db = DB::getInstance();
-        $village = $db->query("SELECT kid, wood, clay, iron, crop, owner, isWW, capital, created, maxstore, maxcrop, cropp, upkeep, isWW FROM vdata WHERE kid=$kid");
+        $village = $db->query("SELECT kid, wood, clay, iron, crop, owner, isWW, capital, created, maxstore, maxcrop, cropp, pop, upkeep, isWW FROM vdata WHERE kid=$kid");
         if (!$village->num_rows) {
             return;
         }
@@ -208,6 +208,21 @@ class AI_MAIN
             $percent);
         $costs = [0, 0, 0, 0];
         $count = $this->maxUnits($selected['nr'], $selected['isGreat']);
+        // Every unit eats crop forever, but the bot only ever looked at the
+        // resources it had in stock. On a server where the bots train on a timer
+        // that ended with upkeep above the village's crop production: crop fell
+        // to 0, the village could not recover and the troop upkeep kept eating
+        // whatever was produced. Only train as many units as the village can
+        // actually feed, so the crop balance never goes permanently negative.
+        $unitId = nrToUnitId($selected['nr'], $race);
+        $upkeepPerUnit = Formulas::uUpkeep($unitId, VillageModel::getHDP($this->village['kid']));
+        if ($upkeepPerUnit > 0) {
+            $freeCrop = $this->village['cropp'] - $this->village['pop'] - $this->village['upkeep'];
+            $count = max(0, min($count, (int)floor($freeCrop / $upkeepPerUnit)));
+        }
+        if ($count <= 0) {
+            return false;
+        }
         for ($i = 0; $i < 4; ++$i) {
             $costs[$i] = $selected['costs'][$i] * $count;
         }

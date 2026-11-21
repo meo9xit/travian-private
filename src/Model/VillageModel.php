@@ -334,6 +334,11 @@ class VillageModel
         $maxcrop = $village['maxcrop'];
         if ($village['extraMaxstore']) $maxstore -= $village['extraMaxstore'] * Formulas::storeCAP(20);
         if ($village['extraMaxcrop']) $maxcrop -= $village['extraMaxcrop'] * Formulas::storeCAP(20);
+        // Removing the extra (farm) capacity must never leave the village without
+        // a warehouse / granary at all: a maxcrop of 0 pins the crop to 0 for
+        // good, because ResourcesHelper caps every update at maxcrop.
+        $maxstore = max($maxstore, Formulas::storeCAP(0));
+        $maxcrop = max($maxcrop, Formulas::storeCAP(0));
         $db->query("UPDATE users SET total_pop=total_pop-{$village['pop']}, cp_prod=cp_prod-{$village['cp']}, total_villages=total_villages-1 WHERE id=$uid");
         $db->query("UPDATE users SET total_pop=total_pop+{$village['pop']}, cp_prod=cp_prod+{$village['cp']}, total_villages=total_villages+1 WHERE id=$newUid");
         $db->query("UPDATE vdata SET isFarm=0, extraMaxstore=0, extraMaxcrop=0, maxstore=$maxstore, maxcrop=$maxcrop, owner=$newUid, expandedfrom=$expandedFrom WHERE kid=$kid");

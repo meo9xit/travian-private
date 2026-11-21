@@ -167,6 +167,14 @@ class ResourcesHelper
                 $resources[3] = -($row['crop'] + $resources[3]) + 1000;
                 $crop = 0;
             }
+            // A negative crop is a debt the UI cannot show (the stock bar uses
+            // max(crop, 0)) and it silently eats every resource added later, so a
+            // village with upkeep above crop production looked frozen on 0 and
+            // market deliveries / NPC trades / gold packages never became
+            // visible. Stop at 0; the troops starve through Game\Starvation.
+            if ($crop + $resources[3] < 0) {
+                $resources[3] = -$crop;
+            }
             $db->query("UPDATE vdata SET wood=wood+{$resources[0]}, clay=clay+{$resources[1]}, iron=iron+{$resources[2]}, crop={$crop}+{$resources[3]}, lastmupdate=$lastmupdate WHERE kid={$row['kid']}");
             $master = new MasterBuilder();
             $master->updateCommence($row['kid'], FALSE);
@@ -298,6 +306,10 @@ class ResourcesHelper
 //            $resources[3] = -($row['crop'] + $resources[3]) + 1000;
 //            $crop = 0;
 //        }
+        // Same clamp as the simple path above: crop is a stock, never a debt.
+        if ($crop + $resources[3] < 0) {
+            $resources[3] = -$crop;
+        }
 
         $db->query("UPDATE vdata SET
                                             wood=wood+{$resources[0]}, woodp={$production[0]},

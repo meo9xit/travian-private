@@ -47,6 +47,11 @@ class FixesCtrl
                     require_once INCLUDE_PATH . "fixes/fixAllResources.php";
                     $content .= '<br /><h2 style="color:red">All resources updated.</h2><br ><br />';
                     break;
+                case 'crop':
+                    require_once INCLUDE_PATH . "fixes/fixCrop.php";
+                    $content .= '<br /><h2 style="color:red">Crop economy repaired.</h2><br /><pre>'
+                        . htmlspecialchars($GLOBALS['cropFixReport'] ?? '') . '</pre><br />';
+                    break;
                 case 'crop_percents':
                     require_once INCLUDE_PATH . "fixes/fixCropPercents.php";
                     $content .= '<br /><h2 style="color:red">Crop percents updated.</h2><br ><br />';
@@ -73,6 +78,7 @@ class FixesCtrl
         $content .= '<a href="?action=fixes&fix=heroPoints">« Fix hero points (negative)</a><br />';
         $content .= '<a href="?action=fixes&fix=inventory_places">« Fix inventory places</a><br />';
         $content .= '<a href="?action=fixes&fix=resources">« Fix productions</a><br />';
+        $content .= '<a href="?action=fixes&fix=crop">« Fix crop (negative crop / storage)</a><br />';
         $content .= '<a href="?action=fixes&fix=crop_percents">« Fix crop percents</a><br />';
         $content .= '<a href="?action=fixes&fix=fix_buildings">« Fix level 0 buildings</a><br />';
 //        $content .= '<a href="?action=fixes&fix=reset_opcache" style="color: darkred">« Invalidate Opcache(s) - (Use with caution)</a><br />';

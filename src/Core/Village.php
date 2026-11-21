@@ -97,7 +97,11 @@ class Village
         $this->village['wood'] = min($this->village['wood'] + $elapsedTime * $this->village['woodp'] / 3600000, $this->village['maxstore']);
         $this->village['clay'] = min($this->village['clay'] + $elapsedTime * $this->village['clayp'] / 3600000, $this->village['maxstore']);
         $this->village['iron'] = min($this->village['iron'] + $elapsedTime * $this->village['ironp'] / 3600000, $this->village['maxstore']);
-        $this->village['crop'] = min($this->village['crop'] + $elapsedTime * ($this->village['cropp'] - $this->village['pop'] - $this->village['upkeep']) / 3600000, $this->village['maxcrop']);
+        // Crop is a stock, never a debt: clamp at 0 as well as at maxcrop, so a
+        // village whose upkeep exceeds its crop production shows 0 instead of an
+        // ever growing negative number (see Game\Starvation and
+        // Game\ResourcesHelper, which persist 0 for the same reason).
+        $this->village['crop'] = max(0, min($this->village['crop'] + $elapsedTime * ($this->village['cropp'] - $this->village['pop'] - $this->village['upkeep']) / 3600000, $this->village['maxcrop']));
         $this->village['lastmupdate'] = $now;
 
         $this->populateBuildings();
