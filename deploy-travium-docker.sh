@@ -284,7 +284,7 @@ confirm() {
 sql_root()   { compose exec -T db mysql -uroot -p"$DB_ROOT_PASS" -e "$1"; }
 sql_db()     { compose exec -T db mysql -uroot -p"$DB_ROOT_PASS" "$1" -e "$2"; }
 sql_scalar() { compose exec -T db mysql -uroot -p"$DB_ROOT_PASS" -N -B "$1" -e "$2" 2>/dev/null | tr -d '\r'; }
-write_file() { local p="$1"; mkdir -p "$(dirname "$p")"; cat >"$p"; chmod 0644 "$p"; }
+write_file() { local p="$1"; mkdir -p "$(dirname "$p")"; cat >"$p"; chmod 0644 "$p"; } #line 287
 
 check_docker() {
     need_cmd docker
@@ -942,7 +942,8 @@ gen_vhost() {
 
     # No TRACE: it reflects request headers and nothing here needs it.
     # (TraceEnable itself is server-level, so it lives in 000-travium-hardening.conf
-    #  written by gen_apache_hardening, not inside this vhost.)    <IfModule mod_headers.c>
+    #  written by gen_apache_hardening, not inside this vhost.)
+    <IfModule mod_headers.c>
         Header always set X-Content-Type-Options "nosniff"
         Header always set X-Frame-Options "SAMEORIGIN"
         Header always set Referrer-Policy "strict-origin-when-cross-origin"
